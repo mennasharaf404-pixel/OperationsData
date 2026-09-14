@@ -189,7 +189,42 @@ def build_csv_url(sheet_id: str, tab_name: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_tab_raw(sheet_id: str, tab_name: str) -> pd.DataFrame | None:
-    """Read one Google Sheet tab as raw text."""
+    """Read one Google Sheet tab without changing the source layout.
+
+    We prefer Google's XLSX export because it preserves the real worksheet
+    structure (including blank rows and the two-row headers used by the
+    monthly sheets). Gviz CSV is kept as a fallback.
+    """
+    import urllib.request
+
+    # 1) Full XLSX export: most faithful to the workbook.
+    try:
+        export_url = (
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        )
+        with urllib.request.urlopen(export_url, timeout=30) as response:
+            content = response.read()
+
+        book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
+        # Match tab names exactly first, then case-insensitively.
+        actual = tab_name
+        if actual not in book.sheet_names:
+            matches = [s for s in book.sheet_names if s.strip().lower() == tab_name.strip().lower()]
+            if not matches:
+                return None
+            actual = matches[0]
+
+        return pd.read_excel(
+            book,
+            sheet_name=actual,
+            header=None,
+            dtype=str,
+            keep_default_na=False,
+        ).fillna("")
+    except Exception:
+        pass
+
+    # 2) CSV fallback.
     try:
         url = build_csv_url(sheet_id, tab_name)
         return pd.read_csv(
@@ -197,7 +232,7 @@ def fetch_tab_raw(sheet_id: str, tab_name: str) -> pd.DataFrame | None:
             header=None,
             dtype=str,
             keep_default_na=False,
-        )
+        ).fillna("")
     except Exception:
         return None
 
@@ -245,213 +280,127 @@ SECTION_ALIASES = {
 
 
 def find_section_rows(raw_df: pd.DataFrame) -> dict:
-    """Find the three real section banners in each monthly tab.
-
-    The source uses decorative Tatweel characters and inconsistent spellings
-    such as "الالغاء" / "الالغاءات" and "التعاقدــــــــات". We detect the
-    stable word stem instead of relying on an exact title.
-    """
+    """Find the actual section banner rows in the monthly worksheet."""
     positions = {}
 
     for idx, row in raw_df.iterrows():
-        text = " ".join(
-            normalize_arabic_text(value)
-            for value in row
-            if clean_text(value)
-        )
+        cells = [normalize_arabic_text(v) for v in row if clean_text(v)]
+        text = " ".join(cells)
+        compact = "".join(cells)
 
-        if not text:
-            continue
-
-        if "الحجز" in text or "الحجوز" in text:
+        if ("حجز" in compact) or ("حجوز" in compact):
             positions.setdefault("الحجوزات", idx)
-        elif "تعاقد" in text or "عقد" in text:
+
+        # The source contains forms such as التعاقدات and التعاقدــــات.
+        if ("تعاقد" in compact) or ("عقد" in compact):
             positions.setdefault("التعاقدات", idx)
-        elif "الالغاء" in text or "الغاء" in text:
+
+        # The source contains الالغاءات with many Tatweel characters.
+        if ("الغاء" in compact) or ("الالغاء" in compact):
             positions.setdefault("الالغاءات", idx)
 
     return positions
 
-def find_header_row(
-    raw_df: pd.DataFrame,
-    start_idx: int,
-    search_window: int = 20,
-    end_idx: int | None = None,
-):
-    """Find the real header row after a section banner.
 
-    The source sheets are not perfectly consistent: some sections have one
-    header row, some have a title/merged row followed by the header, and some
-    use Arabic/English column names. We therefore score rows by header words
-    instead of assuming a fixed number of rows.
+def make_section_columns(raw_df: pd.DataFrame, header_row: int) -> list[str]:
+    """Build readable column names from the two header rows.
+
+    Example:
+        بيانات الوحده + رقم العمارة -> رقم العمارة
+        بيانات الوحده + رقم الوحده  -> رقم الوحده
+
+    Top-level headers are retained when there is no sub-header.
     """
-    header_terms = [
-        "م", "اسم العميل", "name of client", "كود العميل", "رقم العميل",
-        "تيم ليدر", "team leader", "phase", "المرحله", "المرحلة",
-        "unit", "unit code", "unit type", "رقم الوحده", "رقم الوحدة",
-        "العماره", "العمارة", "building", "floor", "status",
-        "الحالة", "حالة", "قيمه الحجز", "قيمة الحجز", "تاريخ الحجز",
-        "قيمه التعاقد", "قيمة التعاقد", "تاريخ التعاقد",
-        "تاريخ التعاقد", "المساحة", "المساحه", "total area",
-        "ملاحظات", "note", "notes", "source", "مصدر",
-    ]
+    width = raw_df.shape[1]
+    top = [clean_text(v) for v in raw_df.iloc[header_row, :width]]
+    sub = (
+        [clean_text(v) for v in raw_df.iloc[header_row + 1, :width]]
+        if header_row + 1 < len(raw_df)
+        else [""] * width
+    )
 
-    natural_limit = start_idx + 1 + search_window
-    if end_idx is not None:
-        natural_limit = min(natural_limit, end_idx)
-    limit = min(len(raw_df), natural_limit)
-    best_idx, best_score = None, -1
-
-    for idx in range(start_idx + 1, limit):
-        vals = [clean_text(v) for v in raw_df.iloc[idx] if clean_text(v)]
-        if len(vals) < 3:
-            continue
-
-        score = 0
-        for value in vals:
-            norm = normalize_arabic_text(value)
-            low = value.lower()
-            if any(term in norm or term.lower() in low for term in header_terms):
-                score += 2
-
-        # Headers normally contain many non-empty cells.
-        score += min(len(vals), 15) * 0.15
-
-        if score > best_score:
-            best_idx, best_score = idx, score
-
-    return best_idx if best_score >= 3 else None
-
-def build_columns(
-    raw_df: pd.DataFrame,
-    header_idx: int,
-    max_col: int,
-) -> list:
-    top_row = raw_df.iloc[header_idx, : max_col + 1].copy()
-    top_row = top_row.replace("", np.nan).ffill()
-
-    sub_row = None
-    if header_idx + 1 < len(raw_df):
-        sub_row = raw_df.iloc[
-            header_idx + 1, : max_col + 1
-        ]
-
-    columns = []
-    seen = {}
-
-    for i in range(max_col + 1):
-        sub_value = (
-            clean_text(sub_row.iloc[i])
-            if sub_row is not None
-            else ""
-        )
-
-        if sub_value:
-            name = sub_value
+    names = []
+    for i in range(width):
+        t, s = top[i], sub[i]
+        if s:
+            name = s
+        elif t:
+            name = t
         else:
-            top_value = clean_text(top_row.iloc[i])
-            name = top_value or f"عمود_{i + 1}"
+            name = f"عمود {i + 1}"
 
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 1
+        names.append(name)
 
-        columns.append(name)
+    # Unique names, preserving every source column.
+    counts = {}
+    unique = []
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+        unique.append(name if counts[name] == 1 else f"{name} ({counts[name]})")
 
-    return columns
+    return unique
 
 
 def extract_section_table(
     raw_df: pd.DataFrame,
-    header_idx: int,
-    next_section_idx: int | None,
+    section_row: int,
+    next_section_row: int | None,
 ) -> pd.DataFrame:
-    """Extract one monthly section exactly as it appears in the source.
+    """Extract records from one real monthly section.
 
-    Every monthly tab uses:
+    The uploaded workbook has a stable layout:
         section title
         blank row
-        main header row
+        header row
         sub-header row
-        data rows
+        records
+        optional totals/notes
+        next section
 
-    Some sections contain a totals row or blank rows at the bottom. The first
-    column ("م") is the reliable record marker, so only rows with a numeric
-    record number are returned. This prevents totals/header/blank rows from
-    becoming fake records.
+    A real record is identified by a numeric value in column 'م'. This is
+    intentionally strict so totals, notes, blank rows and header fragments
+    cannot enter the dashboard as fake records.
     """
-    end_idx = next_section_idx if next_section_idx is not None else len(raw_df)
+    end = next_section_row if next_section_row is not None else len(raw_df)
 
-    # In the real workbook the two header rows are always immediately after
-    # the section banner.
-    header1_idx = header_idx + 2
-    header2_idx = header_idx + 3
-    data_start = header_idx + 4
+    header_row = section_row + 2
+    subheader_row = section_row + 3
+    data_start = section_row + 4
 
-    if header1_idx >= end_idx:
+    if header_row >= end:
         return pd.DataFrame()
 
-    width = raw_df.shape[1]
-    columns = []
-
-    for col_idx in range(width):
-        top = clean_text(raw_df.iat[header1_idx, col_idx])
-        sub = (
-            clean_text(raw_df.iat[header2_idx, col_idx])
-            if header2_idx < end_idx
-            else ""
-        )
-
-        # The sub-header is more specific for grouped fields such as
-        # "بيانات الوحده"; otherwise keep the main header.
-        name = sub or top or f"عمود_{col_idx + 1}"
-        columns.append(name)
-
-    # Make duplicate headers unique without losing any source columns.
-    seen = {}
-    unique_columns = []
-    for name in columns:
-        seen[name] = seen.get(name, 0) + 1
-        unique_columns.append(
-            name if seen[name] == 1 else f"{name}_{seen[name]}"
-        )
-
-    data = raw_df.iloc[data_start:end_idx, :width].copy()
-    data.columns = unique_columns
+    columns = make_section_columns(raw_df, header_row)
+    data = raw_df.iloc[data_start:end, :len(columns)].copy()
+    data.columns = columns
 
     if data.empty:
-        return pd.DataFrame(columns=unique_columns)
+        return pd.DataFrame(columns=columns)
 
-    # Remove completely blank rows.
-    data = data[
-        data.apply(
-            lambda row: any(clean_text(v) for v in row),
-            axis=1,
-        )
-    ]
+    # Remove fully empty rows.
+    nonempty = data.apply(
+        lambda row: any(clean_text(v) for v in row),
+        axis=1,
+    )
+    data = data.loc[nonempty].copy()
 
-    # The actual records in this workbook have a numeric value in "م".
-    # This also removes subtotal/total rows and decorative rows.
-    serial = pd.to_numeric(data.iloc[:, 0], errors="coerce")
+    # Column 0 is always "م" in these monthly sheets.
+    serial = pd.to_numeric(
+        data.iloc[:, 0].astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
     data = data.loc[serial.notna()].copy()
 
-    # Keep the original serial value, but normalize whitespace in text cells.
+    # Keep source values as text; normalize only surrounding whitespace.
     for col in data.columns:
         data[col] = data[col].map(clean_text)
 
+    # Preserve source order and reset the display index.
     return data.reset_index(drop=True)
 
 
-
 def parse_month_tab(raw_df: pd.DataFrame) -> dict:
-    """Parse a monthly tab from its three explicit sections.
-
-    This is deliberately based on the actual monthly workbook layout rather
-    than guessing categories from cell values. Each tab has separate sections
-    for bookings, contracts and cancellations.
-    """
+    """Parse a monthly tab using its explicit three sections."""
     result = {
         "الحجوزات": pd.DataFrame(),
         "التعاقدات": pd.DataFrame(),
@@ -459,17 +408,10 @@ def parse_month_tab(raw_df: pd.DataFrame) -> dict:
     }
 
     positions = find_section_rows(raw_df)
-    if not positions:
-        return result
-
-    ordered = sorted(positions.items(), key=lambda item: item[1])
+    ordered = sorted(positions.items(), key=lambda x: x[1])
 
     for i, (category, section_row) in enumerate(ordered):
         next_row = ordered[i + 1][1] if i + 1 < len(ordered) else None
-
-        if category not in result:
-            continue
-
         result[category] = extract_section_table(
             raw_df,
             section_row,
