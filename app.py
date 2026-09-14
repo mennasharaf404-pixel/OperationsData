@@ -694,7 +694,7 @@ def main():
     load_custom_months()
     with st.sidebar:
         st.markdown("<div style='font-size:25px;font-weight:800;'>EL MOLTQA</div>", unsafe_allow_html=True)
-        st.markdown("<div style='color:#9ca3af;font-size:12px;margin-bottom:18px;'>Operations & Sales</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#9ca3af;font-size:12px;margin-bottom:18px;'>Operations</div>", unsafe_allow_html=True)
 
         if st.button("🔄 تحديث البيانات", use_container_width=True):
             st.cache_data.clear()
