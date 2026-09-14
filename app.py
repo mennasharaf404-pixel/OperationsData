@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-EL MOLTQA — Operations & Sales Dashboard
+EL MOLTQA — Operations Data Dashboard
 Reads the existing Google Sheet without changing the source.
 The workbook contains monthly tabs with three separate tables:
 الحجوزات / التعاقدات / الالغاءات.
