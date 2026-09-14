@@ -794,12 +794,14 @@ def main():
 
         st.markdown("### ملخص شهري")
         if selected_month == "كل الشهور":
+            st.caption("ترتيب الشهور: سبتمبر ← أغسطس ← يوليو ← يونيو ← مايو ← أبريل ← مارس ← فبراير ← يناير")
             month_order = ordered_months(all_data["الشهر"].unique())
+            plot_order = list(reversed(month_order))
             summary = (
                 all_data.groupby(["الشهر","النوع"])
                 .size()
                 .unstack(fill_value=0)
-                .reindex(month_order)
+                .reindex(plot_order)
             )
             for c in CATEGORIES:
                 if c not in summary.columns:
@@ -817,7 +819,8 @@ def main():
         with c2:
             st.markdown("#### إجمالي السجلات حسب الشهر")
             month_order = ordered_months(all_data["الشهر"].unique())
-            by_month = all_data.groupby("الشهر").size().reindex(month_order).fillna(0)
+            plot_order = list(reversed(month_order))
+            by_month = all_data.groupby("الشهر").size().reindex(plot_order).fillna(0)
             st.bar_chart(by_month, use_container_width=True)
 
         st.markdown("### أهم الأرقام المتاحة")
