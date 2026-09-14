@@ -346,56 +346,62 @@ def extract_section_table(
     section_row: int,
     next_section_row: int | None,
 ) -> pd.DataFrame:
-    """Extract records from one real monthly section.
+    """Extract a section without assuming a fixed number of header rows.
 
-    The uploaded workbook has a stable layout:
-        section title
-        blank row
-        header row
-        sub-header row
-        records
-        optional totals/notes
-        next section
-
-    A real record is identified by a numeric value in column 'م'. This is
-    intentionally strict so totals, notes, blank rows and header fragments
-    cannot enter the dashboard as fake records.
+    Some tabs have a two-row header, while others can effectively behave like
+    a one-row header. The important rule is: find the real row containing
+    ``م`` first, then start records immediately after the actual header rows.
+    This prevents the first real record from being skipped.
     """
     end = next_section_row if next_section_row is not None else len(raw_df)
-
-    header_row = section_row + 2
-    subheader_row = section_row + 3
-    data_start = section_row + 4
-
-    if header_row >= end:
+    if section_row + 1 >= end:
         return pd.DataFrame()
 
+    # Find the real header row inside this section.
+    header_row = None
+    search_end = min(end, section_row + 8)
+    for r in range(section_row + 1, search_end):
+        vals = [normalize_arabic_text(v) for v in raw_df.iloc[r].tolist()]
+        if any(v == "م" for v in vals) or any("كود العميل" in v for v in vals):
+            header_row = r
+            break
+
+    if header_row is None:
+        return pd.DataFrame()
+
+    # A second header row exists when it contains unit-field labels such as
+    # رقم العمارة / رقم الوحده / المساحه. Otherwise the header is one row.
+    subheader_row = None
+    if header_row + 1 < end:
+        vals = [normalize_arabic_text(v) for v in raw_df.iloc[header_row + 1].tolist()]
+        subheader_markers = ("رقم العمارة", "رقم الوحده", "المساحه", "اسم المرحلة", "المشروع")
+        if any(any(marker in v for marker in subheader_markers) for v in vals):
+            subheader_row = header_row + 1
+
     columns = make_section_columns(raw_df, header_row)
+    data_start = (subheader_row + 1) if subheader_row is not None else (header_row + 1)
     data = raw_df.iloc[data_start:end, :len(columns)].copy()
     data.columns = columns
 
     if data.empty:
         return pd.DataFrame(columns=columns)
 
-    # Remove fully empty rows.
-    nonempty = data.apply(
-        lambda row: any(clean_text(v) for v in row),
-        axis=1,
-    )
-    data = data.loc[nonempty].copy()
+    # Remove completely empty rows.
+    data = data.loc[data.apply(lambda row: any(clean_text(v) for v in row), axis=1)].copy()
 
-    # Column 0 is always "م" in these monthly sheets.
-    serial = pd.to_numeric(
-        data.iloc[:, 0].astype(str).str.replace(",", "", regex=False).str.strip(),
-        errors="coerce",
-    )
-    data = data.loc[serial.notna()].copy()
+    # Do NOT require the first column to be numeric. A valid first record can
+    # contain a text-formatted serial after Google export. Keep any row whose
+    # first cell is populated, while excluding obvious totals/headers.
+    first_col = data.iloc[:, 0].map(clean_text)
+    normalized_first = first_col.map(normalize_arabic_text)
+    keep = first_col.ne("")
+    keep &= ~normalized_first.str.contains(r"اجمال|الإجمال|الاجمال|total|مجموع", case=False, regex=True, na=False)
+    keep &= ~normalized_first.eq("م")
+    data = data.loc[keep].copy()
 
-    # Keep source values as text; normalize only surrounding whitespace.
     for col in data.columns:
         data[col] = data[col].map(clean_text)
 
-    # Preserve source order and reset the display index.
     return data.reset_index(drop=True)
 
 
