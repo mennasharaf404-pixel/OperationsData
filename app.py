@@ -718,9 +718,6 @@ def main():
             type=["xlsx", "xls"],
             help="يُستخدم فقط إذا تعذر الوصول إلى Google Sheets. لا يغيّر المصدر الأصلي.",
         )
-        st.caption("البيانات تُحدّث عند الطلب أو تلقائياً كل 5 دقائق.")
-        st.caption("التعديلات والإضافات المحلية: تُحفظ في el_moltqa_changes.json")
-
     with st.spinner("جاري قراءة جميع الشهور والجداول..."):
         upload_bytes = local_upload.getvalue() if local_upload is not None else None
         all_data, diagnostics, raw_sizes, failures = load_all_months(upload_bytes)
