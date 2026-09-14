@@ -233,67 +233,146 @@ def csv_export_url(sheet_id, tab):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_tab(tab_name):
-    """Load the exact worksheet as raw cells. XLSX first; CSV fallback."""
+def load_tab(tab_name, local_file_name=""):
+    """Load one tab robustly.
+
+    Priority:
+      1) Google Sheets XLSX export
+      2) Google Sheets CSV export
+      3) Local workbook fallback when supplied by the user
+    """
     errors = []
+
+    # 1) Google XLSX export
     try:
         req = urllib.request.Request(
             xlsx_export_url(SHEET_ID),
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=35) as r:
             content = r.read()
+        if content[:2] != b"PK":
+            raise ValueError("Google XLSX export did not return an Excel workbook")
         book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
-        actual = next((s for s in book.sheet_names if s == tab_name), None)
+        actual = next((x for x in book.sheet_names if x == tab_name), None)
         if actual is None:
-            actual = next((s for s in book.sheet_names if s.strip().lower() == tab_name.strip().lower()), None)
+            actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
         if actual is None:
-            raise ValueError(f"Tab not found: {tab_name}")
+            raise ValueError(f"Tab not found in Google workbook: {tab_name}")
         df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
-        return df.fillna(""), "xlsx", None
+        if df.shape[0] == 0 or df.shape[1] == 0:
+            raise ValueError(f"Google tab {tab_name} is empty")
+        return df.fillna(""), "google-xlsx", None
     except Exception as e:
-        errors.append(str(e))
+        errors.append(f"Google XLSX: {e}")
 
+    # 2) Google CSV export
     try:
         req = urllib.request.Request(
             csv_export_url(SHEET_ID, tab_name),
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/csv,*/*"},
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
-            df = pd.read_csv(r, header=None, dtype=str, keep_default_na=False)
-        return df.fillna(""), "csv", None
+        with urllib.request.urlopen(req, timeout=35) as r:
+            payload = r.read()
+        if not payload:
+            raise ValueError("Empty CSV response")
+        df = pd.read_csv(BytesIO(payload), header=None, dtype=str, keep_default_na=False)
+        if df.shape[0] == 0 or df.shape[1] == 0:
+            raise ValueError(f"Google CSV tab {tab_name} is empty")
+        return df.fillna(""), "google-csv", None
     except Exception as e:
-        errors.append(str(e))
+        errors.append(f"Google CSV: {e}")
 
-    return None, None, " | ".join(errors[-2:])
+    # 3) Local fallback (only when the file exists / is supplied)
+    if local_file_name:
+        try:
+            if Path(local_file_name).exists():
+                book = pd.ExcelFile(local_file_name, engine="openpyxl")
+                actual = next((x for x in book.sheet_names if x == tab_name), None)
+                if actual is None:
+                    actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
+                if actual is None:
+                    raise ValueError(f"Tab not found in local workbook: {tab_name}")
+                df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
+                return df.fillna(""), "local-xlsx", None
+        except Exception as e:
+            errors.append(f"Local XLSX: {e}")
+
+    return None, None, " | ".join(errors)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_all_months():
+def load_all_months(local_file_bytes=None, cache_version="2026-09-14-v6"):
+    """Read every month first, then parse its three tables.
+
+    The cache_version intentionally busts old empty-cache results from earlier builds.
+    """
+    local_path = ""
+    tmp_path = ""
+    if local_file_bytes:
+        try:
+            import tempfile
+            with tempfile.NamedTemporaryFile(prefix="elmoltqa_", suffix=".xlsx", delete=False) as f:
+                f.write(local_file_bytes)
+                tmp_path = f.name
+            local_path = tmp_path
+        except Exception:
+            local_path = ""
+
+    # Auto-detect a workbook already placed beside the app.
+    if not local_path:
+        for candidate in ["Copy of OPERTION 2026.xlsx", "dataexcel.xlsx", "OPERTION 2026.xlsx"]:
+            if Path(candidate).exists():
+                local_path = candidate
+                break
+
     all_rows = []
     diagnostics = {}
     raw_sizes = {}
     failures = []
+
     for month, tab in MONTH_TAB_MAP.items():
-        raw, source, err = load_tab(tab)
+        raw, source, err = load_tab(tab, local_path)
         if raw is None:
             failures.append(f"{month} ({tab})")
+            diagnostics[month] = {"tab": tab, "source": None, "error": err}
             continue
+
         raw_sizes[month] = (len(raw), raw.shape[1], source)
         parsed, diag, sections = parse_month(raw)
-        diagnostics[month] = {"tab": tab, "diagnostics": diag, "sections": [(r + 1, k) for r, k in sections]}
+        diagnostics[month] = {
+            "tab": tab,
+            "source": source,
+            "diagnostics": diag,
+            "sections": [(r + 1, k) for r, k in sections],
+        }
+
         for category, frame in parsed.items():
             if frame.empty:
                 continue
             x = frame.copy()
             x.insert(0, "الشهر", month)
             x.insert(1, "النوع", category)
-            x.insert(len(x.columns), "__record_id__", [f"src:{month}:{category}:{i}" for i in range(len(x))])
+            x.insert(len(x.columns), "__record_id__", [
+                f"src:{month}:{category}:{i}" for i in range(len(x))
+            ])
             all_rows.append(x)
+
     if all_rows:
         union = pd.concat(all_rows, ignore_index=True, sort=False).fillna("")
     else:
         union = pd.DataFrame()
+
+    # Remove the temporary uploaded copy after parsing.
+    if tmp_path:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     return union, diagnostics, raw_sizes, failures
 
 # =========================================================
@@ -592,19 +671,36 @@ def main():
         search = st.text_input("بحث", placeholder="العميل، الوحدة، العمارة، Team Leader ...")
 
         st.divider()
-        st.caption("المصدر: Google Sheets")
+        st.caption("المصدر الأساسي: Google Sheets")
+        local_upload = st.file_uploader(
+            "ملف Excel احتياطي (اختياري)",
+            type=["xlsx", "xls"],
+            help="يُستخدم فقط إذا تعذر الوصول إلى Google Sheets. لا يغيّر المصدر الأصلي.",
+        )
         st.caption("البيانات تُحدّث عند الطلب أو تلقائياً كل 5 دقائق.")
         st.caption("التعديلات والإضافات المحلية: تُحفظ في el_moltqa_changes.json")
 
     with st.spinner("جاري قراءة جميع الشهور والجداول..."):
-        all_data, diagnostics, raw_sizes, failures = load_all_months()
+        upload_bytes = local_upload.getvalue() if local_upload is not None else None
+        all_data, diagnostics, raw_sizes, failures = load_all_months(upload_bytes)
 
     all_data, changes = apply_changes(all_data)
 
     if all_data.empty:
-        st.error("لم يتم العثور على سجلات. راجعي صلاحية Google Sheet: Anyone with the link → Viewer.")
+        st.error("تم الوصول إلى التطبيق، لكن لم يتم استخراج أي سجل من الجداول.")
         if failures:
             st.caption("تعذر تحميل: " + ", ".join(failures))
+        st.markdown("### فحص مصدر البيانات")
+        for month, info in diagnostics.items():
+            if info.get("source"):
+                st.write({
+                    "الشهر": month,
+                    "Tab": info.get("tab"),
+                    "المصدر": info.get("source"),
+                    "الأقسام": info.get("sections", []),
+                })
+            else:
+                st.write({"الشهر": month, "Tab": info.get("tab"), "الخطأ": info.get("error", "")})
         return
 
     # Base view
