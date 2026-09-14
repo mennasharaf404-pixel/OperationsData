@@ -767,9 +767,8 @@ def main():
 
     # Header
     st.markdown(
-        f"<div class='hero'><div class='hero-title'>EL MOLTQA — متابعة المبيعات والعمليات</div>"
-        f"<div class='hero-sub'>بيانات فعلية من الشيت • {('كل الشهور' if selected_month == 'كل الشهور' else selected_month)}"
-        f" <span class='small-tag'>{len(current):,} سجل ظاهر</span></div></div>",
+        f"<div class='hero'><div class='hero-title'>Operations Data</div>"
+        f" <span class='small-tag'>{len(current):,} سجل </span></div></div>",
         unsafe_allow_html=True,
     )
 
