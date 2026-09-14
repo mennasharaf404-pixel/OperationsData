@@ -16,10 +16,6 @@ import re
 from io import BytesIO
 from urllib.parse import quote
 import urllib.request
-import json
-import requests
-from pathlib import Path
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -61,31 +57,32 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
     html, body, [class*="css"] { font-family: "Cairo", sans-serif; }
-    .stApp { background: #f4f6f8; }
-    [data-testid="stSidebar"] { background: linear-gradient(180deg,#17212b 0%,#0f1720 100%); }
-    [data-testid="stSidebar"] * { color: #f8fafc !important; }
+    .stApp { background: #f6f7fb; }
+    [data-testid="stSidebar"] { background: #111827; }
+    [data-testid="stSidebar"] * { color: #f9fafb !important; }
+    .brand { font-size: 2rem; font-weight: 800; color:#111827; margin-bottom:0; }
+    .muted { color:#6b7280; }
     .hero {
-      background: linear-gradient(135deg,#13202b 0%,#1e3444 55%,#274b5b 100%);
-      border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:28px 30px;
-      box-shadow:0 14px 34px rgba(15,23,42,.12); margin-bottom:20px; color:#fff;
+      background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+      border:1px solid #e5e7eb; border-radius:20px; padding:24px 26px;
+      box-shadow:0 8px 24px rgba(15,23,42,.05); margin-bottom:18px;
     }
-    .hero-title { font-size:1.95rem; font-weight:800; color:#fff; }
-    .hero-sub { margin-top:6px; color:#d6e0e6; font-size:.92rem; }
-    .badge { display:inline-block; margin-right:8px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,.12); color:#fff; font-size:.75rem; font-weight:700; }
-    .section-title { font-size:1.22rem; font-weight:800; color:#17212b; margin:1.1rem 0 .65rem; }
-    .kpi { background:#fff; border:1px solid #e2e8ed; border-radius:18px; padding:18px 20px; min-height:118px; box-shadow:0 7px 20px rgba(23,33,43,.06); }
-    .kpi-label { font-size:.83rem; color:#71808c; font-weight:700; }
-    .kpi-value { font-size:1.72rem; color:#17212b; font-weight:800; margin-top:5px; }
-    .kpi-note { font-size:.72rem; color:#98a5ae; margin-top:3px; }
-    .card { background:#fff; border:1px solid #e2e8ed; border-radius:18px; padding:18px; box-shadow:0 7px 20px rgba(23,33,43,.05); }
-    .cat-booking { border-right:5px solid #2f80ed; }
-    .cat-contract { border-right:5px solid #1f9d73; }
-    .cat-cancel { border-right:5px solid #d95c5c; }
-    .small-tag { display:inline-block; padding:5px 10px; border-radius:999px; background:#edf3f6; color:#315364; font-size:.75rem; font-weight:700; }
-    .notice { background:#fff8e6; border:1px solid #f1dfad; color:#755d19; border-radius:14px; padding:12px 14px; }
-    div[data-testid="stMetric"] { background:#fff; border:1px solid #e2e8ed; border-radius:14px; }
-    .block-container { padding-top:1.4rem; padding-bottom:3rem; }
-    button[kind="primary"] { border-radius:10px; }
+    .hero-title { font-size:1.8rem; font-weight:800; color:#111827; }
+    .hero-sub { margin-top:4px; color:#6b7280; font-size:.92rem; }
+    .kpi {
+      background:#fff; border:1px solid #e5e7eb; border-radius:16px;
+      padding:18px 20px; min-height:118px; box-shadow:0 4px 14px rgba(15,23,42,.045);
+    }
+    .kpi-label { font-size:.84rem; color:#6b7280; font-weight:700; }
+    .kpi-value { font-size:1.65rem; color:#111827; font-weight:800; margin-top:5px; }
+    .kpi-note { font-size:.72rem; color:#9ca3af; margin-top:3px; }
+    .card {
+      background:#fff; border:1px solid #e5e7eb; border-radius:18px;
+      padding:18px; box-shadow:0 4px 14px rgba(15,23,42,.04);
+    }
+    .small-tag { display:inline-block; padding:5px 10px; border-radius:999px; background:#eef2ff; color:#4338ca; font-size:.75rem; font-weight:700; }
+    div[data-testid="stMetric"] { background:#fff; border:1px solid #e5e7eb; border-radius:14px; }
+    .block-container { padding-top:1.5rem; padding-bottom:3rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -141,14 +138,12 @@ def find_section_rows(raw: pd.DataFrame):
 
 def looks_like_header(row) -> bool:
     vals = [norm(v) for v in row.tolist()]
-    nonempty = [v for v in vals if v]
-    if len(nonempty) < 4:
-        return False
-    has_serial = any(v == "م" for v in nonempty)
-    has_client = any("اسمالعميل" in v or "اسم" == v for v in nonempty)
-    has_code = any("كودالعميل" in v or "كود" == v for v in nonempty)
-    has_unit = any("بياناتالوحده" in v or "رقمالوحده" in v or "رقمالعمارة" in v for v in nonempty)
-    return (has_serial and (has_client or has_code) and has_unit)
+    return (
+        len(vals) > 2
+        and vals[0] == "م"
+        and any("اسمالعميل" in v for v in vals)
+        and any("كودالعميل" in v for v in vals)
+    )
 
 
 def find_header_row(raw, section_row, end_row):
@@ -235,172 +230,67 @@ def csv_export_url(sheet_id, tab):
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(tab)}"
 
 
-def html_export_url(sheet_id, tab):
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:html&sheet={quote(tab)}"
-
-
 @st.cache_data(ttl=300, show_spinner=False)
-def load_tab(tab_name, local_file_name=""):
-    """Load the original worksheet structure as faithfully as possible.
-
-    IMPORTANT: Never silently prefer CSV over XLSX if an Excel export is
-    available. The monthly source uses stacked tables and merged/two-row
-    headers; CSV can trim trailing rows and alter the layout.
-    """
+def load_tab(tab_name):
+    """Load the exact worksheet as raw cells. XLSX first; CSV fallback."""
     errors = []
-
-    # 1) Google XLSX export — the source of truth for stacked worksheet layout.
     try:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-            "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream;q=0.9,*/*;q=0.8",
-        })
-        resp = session.get(xlsx_export_url(SHEET_ID), timeout=45, allow_redirects=True)
-        resp.raise_for_status()
-        content = resp.content
-        if not content.startswith(b"PK"):
-            raise ValueError(f"Google XLSX export returned {resp.status_code} {resp.headers.get('content-type','')}")
-        book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
-        actual = next((x for x in book.sheet_names if x == tab_name), None)
-        if actual is None:
-            actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
-        if actual is None:
-            raise ValueError(f"Tab not found: {tab_name}. Available: {', '.join(book.sheet_names)}")
-        df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
-        df = df.fillna("")
-        if df.empty:
-            raise ValueError(f"Tab {tab_name} is empty")
-        return df, "google-xlsx", None
-    except Exception as e:
-        errors.append(f"Google XLSX: {type(e).__name__}: {e}")
-
-    # 2) Google HTML export — better structure than CSV when XLSX is blocked.
-    try:
-        resp = requests.get(
-            html_export_url(SHEET_ID, tab_name),
+        req = urllib.request.Request(
+            xlsx_export_url(SHEET_ID),
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=35,
         )
-        resp.raise_for_status()
-        tables = pd.read_html(resp.text)
-        if not tables:
-            raise ValueError("No HTML table returned")
-        # gviz may return helper tables; choose the widest/longest one.
-        df0 = max(tables, key=lambda x: (len(x) * max(1, x.shape[1])))
-        df = df0.astype(str).replace("nan", "").fillna("")
-        if df.empty:
-            raise ValueError("HTML table is empty")
-        return df, "google-html", None
+        with urllib.request.urlopen(req, timeout=30) as r:
+            content = r.read()
+        book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
+        actual = next((s for s in book.sheet_names if s == tab_name), None)
+        if actual is None:
+            actual = next((s for s in book.sheet_names if s.strip().lower() == tab_name.strip().lower()), None)
+        if actual is None:
+            raise ValueError(f"Tab not found: {tab_name}")
+        df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
+        return df.fillna(""), "xlsx", None
     except Exception as e:
-        errors.append(f"Google HTML: {type(e).__name__}: {e}")
+        errors.append(str(e))
 
-    # 3) Google CSV fallback — only as a last resort.
     try:
-        resp = requests.get(
+        req = urllib.request.Request(
             csv_export_url(SHEET_ID, tab_name),
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=35,
         )
-        resp.raise_for_status()
-        if not resp.content:
-            raise ValueError("Empty CSV response")
-        df = pd.read_csv(BytesIO(resp.content), header=None, dtype=str, keep_default_na=False)
-        df = df.fillna("")
-        if df.empty:
-            raise ValueError("CSV table is empty")
-        return df, "google-csv", None
+        with urllib.request.urlopen(req, timeout=30) as r:
+            df = pd.read_csv(r, header=None, dtype=str, keep_default_na=False)
+        return df.fillna(""), "csv", None
     except Exception as e:
-        errors.append(f"Google CSV: {type(e).__name__}: {e}")
+        errors.append(str(e))
 
-    # 4) Local Excel fallback.
-    if local_file_name:
-        try:
-            path = Path(local_file_name)
-            if path.exists():
-                book = pd.ExcelFile(path, engine="openpyxl")
-                actual = next((x for x in book.sheet_names if x == tab_name), None)
-                if actual is None:
-                    actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
-                if actual is None:
-                    raise ValueError(f"Tab not found in local workbook: {tab_name}")
-                df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False).fillna("")
-                return df, "local-xlsx", None
-        except Exception as e:
-            errors.append(f"Local XLSX: {type(e).__name__}: {e}")
-
-    return None, None, " | ".join(errors)
+    return None, None, " | ".join(errors[-2:])
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_all_months(local_file_bytes=None, cache_version="2026-09-14-v6"):
-    """Read every month first, then parse its three tables.
-
-    The cache_version intentionally busts old empty-cache results from earlier builds.
-    """
-    local_path = ""
-    tmp_path = ""
-    if local_file_bytes:
-        try:
-            import tempfile
-            with tempfile.NamedTemporaryFile(prefix="elmoltqa_", suffix=".xlsx", delete=False) as f:
-                f.write(local_file_bytes)
-                tmp_path = f.name
-            local_path = tmp_path
-        except Exception:
-            local_path = ""
-
-    # Auto-detect a workbook already placed beside the app.
-    if not local_path:
-        for candidate in ["Copy of OPERTION 2026.xlsx", "dataexcel.xlsx", "OPERTION 2026.xlsx"]:
-            if Path(candidate).exists():
-                local_path = candidate
-                break
-
+def load_all_months():
     all_rows = []
     diagnostics = {}
     raw_sizes = {}
     failures = []
-
     for month, tab in MONTH_TAB_MAP.items():
-        raw, source, err = load_tab(tab, local_path)
+        raw, source, err = load_tab(tab)
         if raw is None:
             failures.append(f"{month} ({tab})")
-            diagnostics[month] = {"tab": tab, "source": None, "error": err}
             continue
-
         raw_sizes[month] = (len(raw), raw.shape[1], source)
         parsed, diag, sections = parse_month(raw)
-        diagnostics[month] = {
-            "tab": tab,
-            "source": source,
-            "diagnostics": diag,
-            "sections": [(r + 1, k) for r, k in sections],
-        }
-
+        diagnostics[month] = {"tab": tab, "diagnostics": diag, "sections": [(r + 1, k) for r, k in sections]}
         for category, frame in parsed.items():
             if frame.empty:
                 continue
             x = frame.copy()
             x.insert(0, "الشهر", month)
             x.insert(1, "النوع", category)
-            x.insert(len(x.columns), "__record_id__", [
-                f"src:{month}:{category}:{i}" for i in range(len(x))
-            ])
             all_rows.append(x)
-
     if all_rows:
         union = pd.concat(all_rows, ignore_index=True, sort=False).fillna("")
     else:
         union = pd.DataFrame()
-
-    # Remove the temporary uploaded copy after parsing.
-    if tmp_path:
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-
     return union, diagnostics, raw_sizes, failures
 
 # =========================================================
@@ -469,216 +359,9 @@ def reorder_columns(df):
     return df[front + rest]
 
 # =========================================================
-# LOCAL EDIT / ADD / DELETE LAYER
-# =========================================================
-EDIT_FILE = Path("el_moltqa_changes.json")
-
-def load_changes():
-    try:
-        if EDIT_FILE.exists():
-            data=json.loads(EDIT_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {"added": [], "deleted": [], "updated": {}, "months": []}
-
-def save_changes(changes):
-    EDIT_FILE.write_text(json.dumps(changes, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def row_key(row):
-    # Prefer an immutable internal ID so edits remain editable/deletable even
-    # after the visible fields change.
-    rid = clean(row.get("__record_id__", ""))
-    if rid:
-        return rid
-    parts=[clean(row.get("الشهر","")), clean(row.get("النوع","")), clean(row.get("م","")), clean(row.get("كود العميل","")), clean(row.get("اسم العميل","")), clean(row.get("رقم الوحده",""))]
-    return "|".join(parts)
-
-def apply_changes(base):
-    changes=load_changes()
-    df=base.copy()
-    if df.empty:
-        return df, changes
-    df["__key__"]=df.apply(row_key, axis=1)
-    deleted=set(changes.get("deleted", []))
-    if deleted:
-        df=df[~df["__key__"].isin(deleted)].copy()
-    updates=changes.get("updated", {}) or {}
-    if updates:
-        for key, vals in updates.items():
-            mask=df["__key__"].eq(key)
-            for col,val in vals.items():
-                if col in df.columns:
-                    df.loc[mask,col]=val
-    added=pd.DataFrame(changes.get("added", []))
-    if not added.empty:
-        for c in df.columns:
-            if c not in added.columns:
-                added[c]=""
-        for c in added.columns:
-            if c not in df.columns and c != "__key__":
-                df[c]=""
-        if "__record_id__" not in added.columns:
-            added["__record_id__"]=[f"add:{uuid.uuid4().hex}" for _ in range(len(added))]
-        else:
-            added["__record_id__"]=added["__record_id__"].map(clean)
-            added.loc[added["__record_id__"].eq(""),"__record_id__"]=[f"add:{uuid.uuid4().hex}" for _ in range(int(added["__record_id__"].eq("").sum()))]
-        added["__key__"]=added.apply(row_key, axis=1)
-        if "__record_id__" not in df.columns:
-            df["__record_id__"]=""
-        df=pd.concat([df, added[df.columns]], ignore_index=True, sort=False)
-    return df, changes
-
-def register_updated(changes, original_row, new_values):
-    key=row_key(original_row)
-    changes.setdefault("updated", {})[key]=new_values
-    save_changes(changes)
-
-def register_deleted(changes, row):
-    key=row_key(row)
-    changes.setdefault("deleted", []).append(key)
-    changes["deleted"]=list(dict.fromkeys(changes["deleted"]))
-    save_changes(changes)
-
-def register_added(changes, row):
-    row = dict(row)
-    row.setdefault("__record_id__", f"add:{uuid.uuid4().hex}")
-    changes.setdefault("added", []).append(row)
-    save_changes(changes)
-
-def reset_local_changes():
-    save_changes({"added": [], "deleted": [], "updated": {}, "months": []})
-
-def load_custom_months():
-    changes = load_changes()
-    custom = changes.get("months", []) or []
-    for item in custom:
-        name = clean(item.get("name", "")) if isinstance(item, dict) else ""
-        tab = clean(item.get("tab", "")) if isinstance(item, dict) else ""
-        if name and name not in MONTH_TAB_MAP:
-            MONTH_TAB_MAP[name] = tab or name
-            MONTHS.append(name)
-
-def next_serial(df):
-    if "م" not in df.columns or df.empty:
-        return 1
-    nums=pd.to_numeric(df["م"], errors="coerce")
-    return int(nums.max())+1 if nums.notna().any() else len(df)+1
-
-def compact_columns(df):
-    preferred=["الشهر","النوع","م","كود العميل","اسم العميل","تيم ليدر","رقم العمارة","رقم الوحده","المساحه","اسم المرحلة","المشروع","مصدر العميل","تاريخ الحجز","تاريخ التعاقد","تاريخ الالغاء","اجمالي الوحده","المقدم","مبلع الحجز","طريقة الدفع","اسم البائع","ملحوظات"]
-    cols=[c for c in preferred if c in df.columns]
-    cols += [c for c in df.columns if c not in cols and c != "__key__"]
-    return cols
-
-def add_management_ui(all_data, changes):
-    st.markdown("<div class='section-title'>إدارة البيانات</div>", unsafe_allow_html=True)
-    tabs=st.tabs(["➕ إضافة شهر","➕ إضافة سجل","✏️ تعديل","🗑️ حذف"])
-
-    with tabs[0]:
-        with st.form("add_month_form", clear_on_submit=True):
-            new_month=st.text_input("اسم الشهر / الفترة", placeholder="مثال: أكتوبر")
-            new_tab=st.text_input("اسم الـ Tab في Google Sheet (اختياري)", placeholder="مثال: Oct")
-            create=st.form_submit_button("إضافة الشهر", type="primary", use_container_width=True)
-        if create and new_month.strip():
-            if new_month.strip() in MONTHS:
-                st.warning("هذا الشهر موجود بالفعل.")
-            else:
-                MONTHS.append(new_month.strip())
-                MONTH_TAB_MAP[new_month.strip()]=new_tab.strip() or new_month.strip()
-                changes.setdefault("months", []).append({"name":new_month.strip(),"tab":new_tab.strip() or new_month.strip()})
-                save_changes(changes)
-                st.success(f"تمت إضافة {new_month.strip()} داخل التطبيق. يمكنك بعد ذلك إضافة سجلات له.")
-                st.rerun()
-        st.caption("الشهر المضاف هنا يضاف كطبقة داخل التطبيق، ولا يغيّر Google Sheet تلقائيًا.")
-
-    with tabs[1]:
-        month_options=MONTHS
-        cat_options=CATEGORIES
-        with st.form("add_record_form", clear_on_submit=True):
-            a1,a2=st.columns(2)
-            with a1: month=st.selectbox("الشهر", month_options, key="add_month")
-            with a2: cat=st.selectbox("القسم", cat_options, key="add_cat")
-            source=all_data[all_data["النوع"].eq(cat)] if not all_data.empty else pd.DataFrame()
-            cols=[c for c in compact_columns(source) if c not in {"الشهر","النوع","__key__"}]
-            common=[c for c in ["م","كود العميل","اسم العميل","تيم ليدر","رقم العمارة","رقم الوحده","المساحه","اسم المرحلة","المشروع","مصدر العميل","تاريخ الحجز","تاريخ التعاقد","تاريخ الالغاء","اجمالي الوحده","المقدم","مبلع الحجز","طريقة الدفع","اسم البائع","ملحوظات"] if c in cols]
-            fields={}
-            if not common: common=["م","اسم العميل","رقم الوحده","ملحوظات"]
-            grid=st.columns(2)
-            for i,c in enumerate(common):
-                with grid[i%2]:
-                    fields[c]=st.text_input(c, value=str(next_serial(source)) if c=="م" else "", key=f"add_{c}")
-            extra=st.text_area("ملاحظات إضافية (اختياري)", key="add_extra")
-            add=st.form_submit_button("إضافة السجل", type="primary", use_container_width=True)
-        if add:
-            row={c:fields.get(c,"") for c in common}
-            row["الشهر"]=month; row["النوع"]=cat
-            if extra:
-                row["ملحوظات"]=extra
-            register_added(changes,row)
-            st.success("تمت إضافة السجل وحفظه محليًا.")
-            st.rerun()
-
-    with tabs[2]:
-        candidates=all_data.copy()
-        if not candidates.empty:
-            edit_q=st.text_input("بحث سريع عن السجل", placeholder="اسم العميل أو رقم الوحدة أو الكود...", key="edit_q")
-            if edit_q.strip():
-                q=edit_q.strip().lower()
-                mask=candidates.astype(str).apply(lambda col: col.str.lower().str.contains(q,regex=False,na=False)).any(axis=1)
-                candidates=candidates.loc[mask].copy()
-            candidates["_label"]=candidates.apply(lambda r: f"{r.get('الشهر','')} | {r.get('النوع','')} | {r.get('م','')} | {r.get('اسم العميل','')}",axis=1)
-            if candidates.empty:
-                st.info("لا توجد سجلات مطابقة للبحث.")
-                return
-            selected_label=st.selectbox("اختار السجل", candidates["_label"].tolist(), key="edit_select")
-            pos=candidates.index[candidates["_label"].eq(selected_label)][0]
-            original=candidates.loc[pos].to_dict()
-            edit_cols=[c for c in compact_columns(candidates) if c not in {"الشهر","النوع","__key__"}]
-            edit_values={}
-            with st.form("edit_record_form"):
-                ec=st.columns(2)
-                for i,c in enumerate(edit_cols[:20]):
-                    with ec[i%2]:
-                        edit_values[c]=st.text_input(c,value=clean(original.get(c,"")),key=f"edit_{c}")
-                save=st.form_submit_button("حفظ التعديل",type="primary",use_container_width=True)
-            if save:
-                register_updated(changes, original, edit_values)
-                st.success("تم تعديل السجل وحفظ التغيير.")
-                st.rerun()
-        else:
-            st.info("لا توجد سجلات للتعديل.")
-
-    with tabs[3]:
-        candidates=all_data.copy()
-        if not candidates.empty:
-            delete_q=st.text_input("بحث سريع عن السجل", placeholder="اسم العميل أو رقم الوحدة أو الكود...", key="delete_q")
-            if delete_q.strip():
-                q=delete_q.strip().lower()
-                mask=candidates.astype(str).apply(lambda col: col.str.lower().str.contains(q,regex=False,na=False)).any(axis=1)
-                candidates=candidates.loc[mask].copy()
-            candidates["_label"]=candidates.apply(lambda r: f"{r.get('الشهر','')} | {r.get('النوع','')} | {r.get('م','')} | {r.get('اسم العميل','')}",axis=1)
-            if candidates.empty:
-                st.info("لا توجد سجلات مطابقة للبحث.")
-                return
-            selected_label=st.selectbox("اختار السجل للحذف", candidates["_label"].tolist(), key="delete_select")
-            pos=candidates.index[candidates["_label"].eq(selected_label)][0]
-            row=candidates.loc[pos].to_dict()
-            st.warning("الحذف هنا يحذف السجل من طبقة التطبيق المحلية فقط، ولن يحذف صفًا من Google Sheet.")
-            if st.button("حذف السجل", type="primary", use_container_width=True):
-                register_deleted(changes,row)
-                st.success("تم حذف السجل من العرض.")
-                st.rerun()
-
-    if st.button("↩️ إزالة كل التعديلات المحلية والعودة للمصدر", use_container_width=True):
-        reset_local_changes(); st.success("تمت إزالة التعديلات المحلية."); st.rerun()
-
-# =========================================================
 # MAIN
 # =========================================================
 def main():
-    load_custom_months()
     with st.sidebar:
         st.markdown("<div style='font-size:25px;font-weight:800;'>EL MOLTQA</div>", unsafe_allow_html=True)
         st.markdown("<div style='color:#9ca3af;font-size:12px;margin-bottom:18px;'>Operations & Sales</div>", unsafe_allow_html=True)
@@ -691,7 +374,7 @@ def main():
         st.markdown("### العرض")
         view_mode = st.radio(
             "",
-            ["نظرة عامة", "الحجوزات", "التعاقدات", "الالغاءات", "كل البيانات", "إدارة البيانات"],
+            ["نظرة عامة", "الحجوزات", "التعاقدات", "الالغاءات", "كل البيانات"],
             label_visibility="collapsed",
         )
 
@@ -699,44 +382,19 @@ def main():
         search = st.text_input("بحث", placeholder="العميل، الوحدة، العمارة، Team Leader ...")
 
         st.divider()
-        st.caption("المصدر الأساسي: Google Sheets")
-        local_upload = st.file_uploader(
-            "ملف Excel احتياطي (اختياري)",
-            type=["xlsx", "xls"],
-            help="يُستخدم فقط إذا تعذر الوصول إلى Google Sheets. لا يغيّر المصدر الأصلي.",
-        )
+        st.caption("المصدر: Google Sheets")
         st.caption("البيانات تُحدّث عند الطلب أو تلقائياً كل 5 دقائق.")
-        st.caption("التعديلات والإضافات المحلية: تُحفظ في el_moltqa_changes.json")
 
     with st.spinner("جاري قراءة جميع الشهور والجداول..."):
-        upload_bytes = local_upload.getvalue() if local_upload is not None else None
-        all_data, diagnostics, raw_sizes, failures = load_all_months(upload_bytes)
-
-    all_data, changes = apply_changes(all_data)
+        all_data, diagnostics, raw_sizes, failures = load_all_months()
 
     if all_data.empty:
-        st.error("تم الوصول إلى التطبيق، لكن لم يتم استخراج أي سجل من الجداول.")
+        st.error("لم يتم العثور على سجلات. راجعي صلاحية Google Sheet: Anyone with the link → Viewer.")
         if failures:
             st.caption("تعذر تحميل: " + ", ".join(failures))
-        st.markdown("### فحص مصدر البيانات")
-        for month, info in diagnostics.items():
-            if info.get("source"):
-                st.write({
-                    "الشهر": month,
-                    "Tab": info.get("tab"),
-                    "المصدر": info.get("source"),
-                    "الأقسام": info.get("sections", []),
-                })
-            else:
-                st.write({"الشهر": month, "Tab": info.get("tab"), "الخطأ": info.get("error", "")})
         return
 
     # Base view
-    if view_mode == "إدارة البيانات":
-        st.markdown("<div class='hero'><div class='hero-title'>إدارة البيانات</div><div class='hero-sub'>إضافة شهر، إضافة سجل، تعديل أو حذف — مع الحفاظ على Google Sheet كما هو.</div></div>", unsafe_allow_html=True)
-        add_management_ui(all_data, changes)
-        return
-
     if view_mode == "نظرة عامة" or view_mode == "كل البيانات":
         current = all_data.copy()
     else:
