@@ -245,34 +245,32 @@ SECTION_ALIASES = {
 
 
 def find_section_rows(raw_df: pd.DataFrame) -> dict:
-    """Find section banners robustly, including merged cells and common
-    Arabic spelling/spacing variations."""
+    """Find the three real section banners in each monthly tab.
+
+    The source uses decorative Tatweel characters and inconsistent spellings
+    such as "الالغاء" / "الالغاءات" and "التعاقدــــــــات". We detect the
+    stable word stem instead of relying on an exact title.
+    """
     positions = {}
 
     for idx, row in raw_df.iterrows():
-        row_texts = [
+        text = " ".join(
             normalize_arabic_text(value)
             for value in row
             if clean_text(value)
-        ]
+        )
 
-        for category, aliases in SECTION_ALIASES.items():
-            if category in positions:
-                continue
+        if not text:
+            continue
 
-            for text in row_texts:
-                # Exact alias match is preferred.
-                if text in aliases:
-                    positions[category] = idx
-                    break
-
-                # Also handle a banner such as "بيانات التعاقدات".
-                if any(alias and alias in text for alias in aliases):
-                    positions[category] = idx
-                    break
+        if "الحجز" in text or "الحجوز" in text:
+            positions.setdefault("الحجوزات", idx)
+        elif "تعاقد" in text or "عقد" in text:
+            positions.setdefault("التعاقدات", idx)
+        elif "الالغاء" in text or "الغاء" in text:
+            positions.setdefault("الالغاءات", idx)
 
     return positions
-
 
 def find_header_row(
     raw_df: pd.DataFrame,
@@ -365,301 +363,120 @@ def build_columns(
     return columns
 
 
-def extract_section_table(raw_df: pd.DataFrame, header_idx: int, next_section_idx) -> pd.DataFrame:
-    """Extract a section robustly, including merged/two-row headers.
+def extract_section_table(
+    raw_df: pd.DataFrame,
+    header_idx: int,
+    next_section_idx: int | None,
+) -> pd.DataFrame:
+    """Extract one monthly section exactly as it appears in the source.
 
-    The important fix here is that the real column names may be on the SECOND
-    row after the section title. We therefore calculate the width from BOTH
-    header rows and start the data after the second row when it is a header.
+    Every monthly tab uses:
+        section title
+        blank row
+        main header row
+        sub-header row
+        data rows
+
+    Some sections contain a totals row or blank rows at the bottom. The first
+    column ("م") is the reliable record marker, so only rows with a numeric
+    record number are returned. This prevents totals/header/blank rows from
+    becoming fake records.
     """
     end_idx = next_section_idx if next_section_idx is not None else len(raw_df)
-    if header_idx >= end_idx:
+
+    # In the real workbook the two header rows are always immediately after
+    # the section banner.
+    header1_idx = header_idx + 2
+    header2_idx = header_idx + 3
+    data_start = header_idx + 4
+
+    if header1_idx >= end_idx:
         return pd.DataFrame()
 
-    def vals(row, width=None):
-        seq = row if width is None else row.iloc[:width]
-        return [clean_text(v) for v in seq]
-
-    first = raw_df.iloc[header_idx]
-    second = raw_df.iloc[header_idx + 1] if header_idx + 1 < end_idx else pd.Series(dtype=object)
-
-    first_vals = vals(first)
-    second_vals = vals(second)
-
-    # Header vocabulary. Exact/partial matches are used rather than requiring
-    # one particular spelling.
-    terms = [
-        "م", "كود", "اسم", "عميل", "تيم", "leader", "team",
-        "unit", "وحده", "الوحدة", "العمارة", "عماره", "building", "floor",
-        "phase", "المرحله", "المرحلة", "status", "الحالة", "حالة",
-        "booking", "حجز", "تعاقد", "contract", "قيمة", "قيمه", "تاريخ",
-        "date", "area", "مساحة", "مساحه", "ملاحظات", "note", "phone", "id",
-    ]
-
-    def header_score(values):
-        nonempty = [v for v in values if v]
-        if len(nonempty) < 2:
-            return 0
-        score = min(len(nonempty), 20) * 0.20
-        for v in nonempty:
-            n = normalize_arabic_text(v)
-            low = v.lower()
-            if any(t.lower() in n or t.lower() in low for t in terms):
-                score += 2
-        return score
-
-    s1 = header_score(first_vals)
-    s2 = header_score(second_vals)
-
-    # If the second row clearly contains the real headers, combine both rows.
-    # This handles merged category headers such as a top row containing
-    # "بيانات العميل" and a second row containing "اسم العميل" / "كود".
-    second_is_header = (
-        len([v for v in second_vals if v]) >= 3
-        and s2 >= max(3.0, s1 * 0.55)
-    )
-
-    # If first row is extremely sparse but second row has normal table width,
-    # it is definitely a two-row header.
-    if len([v for v in first_vals if v]) <= 2 and len([v for v in second_vals if v]) >= 3:
-        second_is_header = True
-
-    header_rows = [first_vals, second_vals] if second_is_header else [first_vals]
-    max_col = max(
-        (i for row in header_rows for i, v in enumerate(row) if v),
-        default=-1,
-    )
-    if max_col < 0:
-        return pd.DataFrame()
-
-    # Build readable unique column names. Prefer the lower/real header; when
-    # it is blank, fall back to the upper merged header.
+    width = raw_df.shape[1]
     columns = []
-    seen = {}
-    for i in range(max_col + 1):
-        a = first_vals[i] if i < len(first_vals) else ""
-        b = second_vals[i] if i < len(second_vals) else ""
-        name = b or a or f"عمود_{i+1}"
-        if a and b and a != b and normalize_arabic_text(b) not in {normalize_arabic_text(a)}:
-            # Keep the useful lower label as the primary name; add the parent
-            # only when it is not just a repeated grouping label.
-            name = b
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 1
+
+    for col_idx in range(width):
+        top = clean_text(raw_df.iat[header1_idx, col_idx])
+        sub = (
+            clean_text(raw_df.iat[header2_idx, col_idx])
+            if header2_idx < end_idx
+            else ""
+        )
+
+        # The sub-header is more specific for grouped fields such as
+        # "بيانات الوحده"; otherwise keep the main header.
+        name = sub or top or f"عمود_{col_idx + 1}"
         columns.append(name)
 
-    data_start = header_idx + (2 if second_is_header else 1)
-    if data_start >= end_idx:
-        return pd.DataFrame(columns=columns)
-
-    data = raw_df.iloc[data_start:end_idx, :max_col + 1].copy()
-    data.columns = columns
-    data = data.replace(r"^\s*$", np.nan, regex=True).dropna(how="all")
-    if data.empty:
-        return data.reset_index(drop=True)
-
-    # Remove repeated header rows that sometimes occur in the source.
-    header_terms = [
-        "اسم العميل", "name of client", "كود العميل", "unit code", "unit type",
-        "قيمه الحجز", "قيمة الحجز", "تاريخ الحجز", "قيمه التعاقد", "قيمة التعاقد",
-        "تاريخ التعاقد", "تيم ليدر", "team leader", "status", "phase",
-        "العماره", "العمارة", "المرحله", "المرحلة",
-    ]
-
-    def repeated_header(row):
-        row_text = " ".join(clean_text(v).lower() for v in row if clean_text(v))
-        hits = sum(1 for t in header_terms if t in row_text)
-        return hits >= 2
-
-    data = data.loc[~data.apply(repeated_header, axis=1)]
-    for col in data.columns:
-        data[col] = data[col].apply(clean_text)
-
-    # A real record normally contains at least one useful value. Do NOT require
-    # a specific "م" or client-name column because some months use different
-    # layouts.
-    data = data[data.apply(lambda r: sum(bool(clean_text(v)) for v in r) >= 1, axis=1)]
-    return data.reset_index(drop=True)
-
-def find_inventory_header_row(raw_df: pd.DataFrame):
-    """Detect the real column-header row used by the inventory-style sheets.
-    Some tabs do not have section banners; instead they start with summary
-    rows (Status / Total Amount / Unit) and the actual headers appear later.
-    """
-    best_idx, best_score = None, -1
-    header_terms = [
-        "phase", "unit code", "unit type", "building", "floor",
-        "status", "total area", "in area", "out area",
-        "اسم العميل", "اسم العميل", "رقم الوحده", "العماره",
-        "المرحله", "قيمه التعاقد", "تاريخ التعاقد", "قيمه الحجز",
-        "تاريخ الحجز", "تيم ليدر", "rooms num", "rooms number",
-    ]
-    for idx in range(len(raw_df)):
-        vals = [clean_text(v).lower() for v in raw_df.iloc[idx] if clean_text(v)]
-        if not vals:
-            continue
-        score = sum(1 for v in vals if any(term in v for term in header_terms))
-        # A real header normally has several non-empty cells.
-        if len(vals) >= 5 and score >= 3 and score > best_score:
-            best_idx, best_score = idx, score
-    return best_idx
-
-
-def extract_inventory_table(raw_df: pd.DataFrame, header_idx: int) -> pd.DataFrame:
-    """Read a sheet where row before the data is the actual header row."""
-    # Use all columns represented by the header, including columns whose
-    # values are empty in the first data rows.
-    header = [clean_text(v) or f"عمود_{i+1}" for i, v in enumerate(raw_df.iloc[header_idx])]
-    columns = []
+    # Make duplicate headers unique without losing any source columns.
     seen = {}
-    for name in header:
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 1
-        columns.append(name)
+    unique_columns = []
+    for name in columns:
+        seen[name] = seen.get(name, 0) + 1
+        unique_columns.append(
+            name if seen[name] == 1 else f"{name}_{seen[name]}"
+        )
 
-    data = raw_df.iloc[header_idx + 1:, :len(columns)].copy()
-    data.columns = columns
-    data = data.replace(r"^\s*$", np.nan, regex=True).dropna(how="all")
+    data = raw_df.iloc[data_start:end_idx, :width].copy()
+    data.columns = unique_columns
+
     if data.empty:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=unique_columns)
 
-    # Drop trailing completely empty columns.
-    data = data.dropna(axis=1, how="all")
+    # Remove completely blank rows.
+    data = data[
+        data.apply(
+            lambda row: any(clean_text(v) for v in row),
+            axis=1,
+        )
+    ]
+
+    # The actual records in this workbook have a numeric value in "م".
+    # This also removes subtotal/total rows and decorative rows.
+    serial = pd.to_numeric(data.iloc[:, 0], errors="coerce")
+    data = data.loc[serial.notna()].copy()
+
+    # Keep the original serial value, but normalize whitespace in text cells.
     for col in data.columns:
-        data[col] = data[col].apply(clean_text)
+        data[col] = data[col].map(clean_text)
+
     return data.reset_index(drop=True)
 
-
-def _col_contains(df, terms):
-    for col in df.columns:
-        c = clean_text(col).lower()
-        if any(term.lower() in c for term in terms):
-            return col
-    return None
-
-
-def split_inventory_categories(df: pd.DataFrame) -> dict:
-    """Build the three dashboard categories from inventory-style data.
-    This is intentionally tolerant because the source uses mixed Arabic and
-    English headers and some columns are duplicated.
-    """
-    empty = pd.DataFrame(columns=df.columns)
-    result = {"الحجوزات": empty.copy(), "التعاقدات": empty.copy(), "الالغاءات": empty.copy()}
-
-    status_col = _col_contains(df, ["status", "الحالة", "حاله", "حالة"])
-    booking_value = _col_contains(df, ["قيمه الحجز", "قيمة الحجز", "booking value", "booking amount"])
-    booking_date = _col_contains(df, ["تاريخ الحجز", "booking date"])
-    booking_client = _col_contains(df, ["name of client", "اسم العميل"])
-    contract_value = _col_contains(df, ["قيمه التعاقد", "قيمة التعاقد", "contract value", "contract amount"])
-    contract_date = _col_contains(df, ["تاريخ التعاقد", "contract date"])
-    cancel_col = _col_contains(df, ["هتتلغي", "تلغي", "الغاء", "إلغاء", "cancel", "cancellation"])
-
-    def nonempty(col):
-        if not col:
-            return pd.Series(False, index=df.index)
-        return df[col].astype(str).str.strip().ne("")
-
-    # Booking rows: explicit booking fields are the strongest signal.
-    booking_mask = nonempty(booking_value) | nonempty(booking_date)
-    # Contract rows: explicit contract fields first; otherwise SOLD rows that
-    # contain a client are treated as contracts because this is how the source
-    # inventory represents sold units.
-    contract_mask = nonempty(contract_value) | nonempty(contract_date)
-    if status_col:
-        status_norm = df[status_col].astype(str).str.strip().str.lower()
-        sold_mask = status_norm.isin(["sold", "s o l d", "مباع", "مباعة", "مباعه", "مباعة"])
-        contract_mask = contract_mask | (sold_mask & nonempty(booking_client))
-
-    # Cancellation rows are only selected when there is an actual cancellation
-    # marker/value; do not classify every blank cancellation cell.
-    cancel_mask = nonempty(cancel_col)
-    if cancel_col:
-        cancel_values = df[cancel_col].astype(str).str.strip().str.lower()
-        cancel_mask = cancel_values.ne("") & ~cancel_values.isin(["no", "لا", "none", "nan", "0", "false"])
-
-    result["الحجوزات"] = df.loc[booking_mask & ~cancel_mask].copy()
-    result["التعاقدات"] = df.loc[contract_mask & ~cancel_mask].copy()
-    result["الالغاءات"] = df.loc[cancel_mask].copy()
-    return result
 
 
 def parse_month_tab(raw_df: pd.DataFrame) -> dict:
-    """Parse a monthly tab using section parsing first, then inventory fallback.
+    """Parse a monthly tab from its three explicit sections.
 
-    This is important for tabs such as June where the visual layout can differ
-    from the other months. We never return an empty category just because a
-    section banner/header was slightly different.
+    This is deliberately based on the actual monthly workbook layout rather
+    than guessing categories from cell values. Each tab has separate sections
+    for bookings, contracts and cancellations.
     """
-    empty_result = {category: pd.DataFrame() for category in CATEGORIES}
+    result = {
+        "الحجوزات": pd.DataFrame(),
+        "التعاقدات": pd.DataFrame(),
+        "الالغاءات": pd.DataFrame(),
+    }
+
     positions = find_section_rows(raw_df)
-
-    # 1) Parse explicit sections when available.
-    if positions:
-        sorted_sections = sorted(positions.items(), key=lambda item: item[1])
-        result = {category: pd.DataFrame() for category in CATEGORIES}
-
-        for i, (category, row_idx) in enumerate(sorted_sections):
-            next_idx = sorted_sections[i + 1][1] if i + 1 < len(sorted_sections) else None
-            header_idx = find_header_row(
-                raw_df,
-                row_idx,
-                search_window=25,
-                end_idx=next_idx,
-            )
-            if header_idx is None:
-                continue
-            result[category] = extract_section_table(raw_df, header_idx, next_idx)
-
-        # 2) Build an inventory-style fallback from the whole tab and use it
-        # only for categories that the section parser could not read.
-        inventory_header = find_inventory_header_row(raw_df)
-        if inventory_header is not None:
-            fallback = split_inventory_categories(
-                extract_inventory_table(raw_df, inventory_header)
-            )
-            for category in CATEGORIES:
-                if result[category].empty and not fallback[category].empty:
-                    result[category] = fallback[category]
-
+    if not positions:
         return result
 
-    # 3) Inventory-style layout: summary rows followed by one real header.
-    header_idx = find_inventory_header_row(raw_df)
-    if header_idx is not None:
-        inventory = extract_inventory_table(raw_df, header_idx)
-        result = split_inventory_categories(inventory)
-        if any(not result[c].empty for c in CATEGORIES):
-            return result
+    ordered = sorted(positions.items(), key=lambda item: item[1])
 
-    # 4) Last resort: detect the strongest header anywhere in the sheet.
-    candidates = []
-    for idx in range(len(raw_df)):
-        vals = [clean_text(v) for v in raw_df.iloc[idx] if clean_text(v)]
-        if len(vals) < 4:
+    for i, (category, section_row) in enumerate(ordered):
+        next_row = ordered[i + 1][1] if i + 1 < len(ordered) else None
+
+        if category not in result:
             continue
-        text = " ".join(vals).lower()
-        hits = sum(
-            t in text for t in [
-                "اسم العميل", "name of client", "قيمه التعاقد", "قيمة التعاقد",
-                "تاريخ التعاقد", "قيمه الحجز", "قيمة الحجز", "تاريخ الحجز",
-                "unit code", "status", "phase", "العماره", "المرحله"
-            ]
-        )
-        candidates.append((hits, len(vals), idx))
 
-    if candidates:
-        _, _, header_idx = max(candidates)
-        return split_inventory_categories(
-            extract_inventory_table(raw_df, header_idx)
+        result[category] = extract_section_table(
+            raw_df,
+            section_row,
+            next_row,
         )
 
-    return empty_result
+    return result
 
 
 # =========================================================
