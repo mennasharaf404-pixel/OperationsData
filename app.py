@@ -17,6 +17,7 @@ from io import BytesIO
 from urllib.parse import quote
 import urllib.request
 import json
+import requests
 from pathlib import Path
 import uuid
 
@@ -140,12 +141,14 @@ def find_section_rows(raw: pd.DataFrame):
 
 def looks_like_header(row) -> bool:
     vals = [norm(v) for v in row.tolist()]
-    return (
-        len(vals) > 2
-        and vals[0] == "م"
-        and any("اسمالعميل" in v for v in vals)
-        and any("كودالعميل" in v for v in vals)
-    )
+    nonempty = [v for v in vals if v]
+    if len(nonempty) < 4:
+        return False
+    has_serial = any(v == "م" for v in nonempty)
+    has_client = any("اسمالعميل" in v or "اسم" == v for v in nonempty)
+    has_code = any("كودالعميل" in v or "كود" == v for v in nonempty)
+    has_unit = any("بياناتالوحده" in v or "رقمالوحده" in v or "رقمالعمارة" in v for v in nonempty)
+    return (has_serial and (has_client or has_code) and has_unit)
 
 
 def find_header_row(raw, section_row, end_row):
@@ -232,74 +235,99 @@ def csv_export_url(sheet_id, tab):
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(tab)}"
 
 
+def html_export_url(sheet_id, tab):
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:html&sheet={quote(tab)}"
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_tab(tab_name, local_file_name=""):
-    """Load one tab robustly.
+    """Load the original worksheet structure as faithfully as possible.
 
-    Priority:
-      1) Google Sheets XLSX export
-      2) Google Sheets CSV export
-      3) Local workbook fallback when supplied by the user
+    IMPORTANT: Never silently prefer CSV over XLSX if an Excel export is
+    available. The monthly source uses stacked tables and merged/two-row
+    headers; CSV can trim trailing rows and alter the layout.
     """
     errors = []
 
-    # 1) Google XLSX export
+    # 1) Google XLSX export — the source of truth for stacked worksheet layout.
     try:
-        req = urllib.request.Request(
-            xlsx_export_url(SHEET_ID),
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=35) as r:
-            content = r.read()
-        if content[:2] != b"PK":
-            raise ValueError("Google XLSX export did not return an Excel workbook")
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+            "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream;q=0.9,*/*;q=0.8",
+        })
+        resp = session.get(xlsx_export_url(SHEET_ID), timeout=45, allow_redirects=True)
+        resp.raise_for_status()
+        content = resp.content
+        if not content.startswith(b"PK"):
+            raise ValueError(f"Google XLSX export returned {resp.status_code} {resp.headers.get('content-type','')}")
         book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
         actual = next((x for x in book.sheet_names if x == tab_name), None)
         if actual is None:
             actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
         if actual is None:
-            raise ValueError(f"Tab not found in Google workbook: {tab_name}")
+            raise ValueError(f"Tab not found: {tab_name}. Available: {', '.join(book.sheet_names)}")
         df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
-        if df.shape[0] == 0 or df.shape[1] == 0:
-            raise ValueError(f"Google tab {tab_name} is empty")
-        return df.fillna(""), "google-xlsx", None
+        df = df.fillna("")
+        if df.empty:
+            raise ValueError(f"Tab {tab_name} is empty")
+        return df, "google-xlsx", None
     except Exception as e:
-        errors.append(f"Google XLSX: {e}")
+        errors.append(f"Google XLSX: {type(e).__name__}: {e}")
 
-    # 2) Google CSV export
+    # 2) Google HTML export — better structure than CSV when XLSX is blocked.
     try:
-        req = urllib.request.Request(
-            csv_export_url(SHEET_ID, tab_name),
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/csv,*/*"},
+        resp = requests.get(
+            html_export_url(SHEET_ID, tab_name),
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=35,
         )
-        with urllib.request.urlopen(req, timeout=35) as r:
-            payload = r.read()
-        if not payload:
-            raise ValueError("Empty CSV response")
-        df = pd.read_csv(BytesIO(payload), header=None, dtype=str, keep_default_na=False)
-        if df.shape[0] == 0 or df.shape[1] == 0:
-            raise ValueError(f"Google CSV tab {tab_name} is empty")
-        return df.fillna(""), "google-csv", None
+        resp.raise_for_status()
+        tables = pd.read_html(resp.text)
+        if not tables:
+            raise ValueError("No HTML table returned")
+        # gviz may return helper tables; choose the widest/longest one.
+        df0 = max(tables, key=lambda x: (len(x) * max(1, x.shape[1])))
+        df = df0.astype(str).replace("nan", "").fillna("")
+        if df.empty:
+            raise ValueError("HTML table is empty")
+        return df, "google-html", None
     except Exception as e:
-        errors.append(f"Google CSV: {e}")
+        errors.append(f"Google HTML: {type(e).__name__}: {e}")
 
-    # 3) Local fallback (only when the file exists / is supplied)
+    # 3) Google CSV fallback — only as a last resort.
+    try:
+        resp = requests.get(
+            csv_export_url(SHEET_ID, tab_name),
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=35,
+        )
+        resp.raise_for_status()
+        if not resp.content:
+            raise ValueError("Empty CSV response")
+        df = pd.read_csv(BytesIO(resp.content), header=None, dtype=str, keep_default_na=False)
+        df = df.fillna("")
+        if df.empty:
+            raise ValueError("CSV table is empty")
+        return df, "google-csv", None
+    except Exception as e:
+        errors.append(f"Google CSV: {type(e).__name__}: {e}")
+
+    # 4) Local Excel fallback.
     if local_file_name:
         try:
-            if Path(local_file_name).exists():
-                book = pd.ExcelFile(local_file_name, engine="openpyxl")
+            path = Path(local_file_name)
+            if path.exists():
+                book = pd.ExcelFile(path, engine="openpyxl")
                 actual = next((x for x in book.sheet_names if x == tab_name), None)
                 if actual is None:
                     actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
                 if actual is None:
                     raise ValueError(f"Tab not found in local workbook: {tab_name}")
-                df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
-                return df.fillna(""), "local-xlsx", None
+                df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False).fillna("")
+                return df, "local-xlsx", None
         except Exception as e:
-            errors.append(f"Local XLSX: {e}")
+            errors.append(f"Local XLSX: {type(e).__name__}: {e}")
 
     return None, None, " | ".join(errors)
 
