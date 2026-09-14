@@ -1,49 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-EL MOLTQA - Google Sheets Dashboard
-------------------------------------
-Reads the monthly company data directly from Google Sheets.
+EL MOLTQA — Operations & Sales Dashboard
+Reads the existing Google Sheet without changing the source.
+The workbook contains monthly tabs with three separate tables:
+الحجوزات / التعاقدات / الالغاءات.
 
-Expected structure:
-- One Google Spreadsheet
-- Monthly tabs: يناير ... سبتمبر
-- Each tab contains sections:
-    الحجوزات
-    التعاقدات
-    الالغاءات
-- Each section has one/two header rows followed by data.
-
-Google Sheet:
-https://docs.google.com/spreadsheets/d/1lHloVtHag6yZs02q8XLcTu-XOF5Pn87rAQNOStkPmc4/edit?gid=928721772#gid=928721772
-
-The sheet must be shared as:
-"Anyone with the link -> Viewer"
+This version is intentionally built around the ACTUAL worksheet structure:
+- section/banner row
+- one main header row beginning with "م"
+- optional second header row for unit details
+- records until the next section
 """
 
 import re
 from io import BytesIO
 from urllib.parse import quote
+import urllib.request
+import json
+from pathlib import Path
+import uuid
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-
 # =========================================================
-# PAGE
+# CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="EL MOLTQA | Sales Dashboard",
+    page_title="EL MOLTQA | Operations Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1lHloVtHag6yZs02q8XLcTu-XOF5Pn87rAQNOStkPmc4"
-    "/edit?gid=928721772#gid=928721772"
-)
+SHEET_ID = "1lHloVtHag6yZs02q8XLcTu-XOF5Pn87rAQNOStkPmc4"
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
 
 MONTH_TAB_MAP = {
     "يناير": "JAN",
@@ -56,1072 +48,743 @@ MONTH_TAB_MAP = {
     "أغسطس": "Aug",
     "سبتمبر": "SEP",
 }
-MONTHS_AR = list(MONTH_TAB_MAP.keys())
-
-CATEGORIES = {
-    "الحجوزات": "📥",
-    "التعاقدات": "📝",
-    "الالغاءات": "❌",
-}
-
-HEADER_HINTS = {
-    "م", "كود العميل", "اسم العميل", "كود", "اسم",
-    "اسم العميل ", "تيم ليدر", "رقم العميل",
-}
-
+MONTHS = list(MONTH_TAB_MAP)
+CATEGORIES = ["الحجوزات", "التعاقدات", "الالغاءات"]
+ICON = {"الحجوزات": "📥", "التعاقدات": "📝", "الالغاءات": "↩️"}
 
 # =========================================================
-# PROFESSIONAL UI
+# STYLE
 # =========================================================
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: "Cairo", sans-serif;
+    html, body, [class*="css"] { font-family: "Cairo", sans-serif; }
+    .stApp { background: #f4f6f8; }
+    [data-testid="stSidebar"] { background: linear-gradient(180deg,#17212b 0%,#0f1720 100%); }
+    [data-testid="stSidebar"] * { color: #f8fafc !important; }
+    .hero {
+      background: linear-gradient(135deg,#13202b 0%,#1e3444 55%,#274b5b 100%);
+      border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:28px 30px;
+      box-shadow:0 14px 34px rgba(15,23,42,.12); margin-bottom:20px; color:#fff;
     }
-
-    .stApp {
-        background: #f5f7fb;
-    }
-
-    [data-testid="stSidebar"] {
-        background: #111827;
-        border-right: 1px solid #1f2937;
-    }
-
-    [data-testid="stSidebar"] * {
-        color: #f9fafb !important;
-    }
-
-    .main-title {
-        font-size: 2.1rem;
-        font-weight: 800;
-        color: #111827;
-        margin-bottom: 0.1rem;
-    }
-
-    .subtitle {
-        color: #6b7280;
-        font-size: 0.95rem;
-        margin-bottom: 1.2rem;
-    }
-
-    .section-title {
-        font-size: 1.25rem;
-        font-weight: 800;
-        color: #111827;
-        margin: 1rem 0 0.6rem 0;
-    }
-
-    .kpi {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 18px 20px;
-        min-height: 125px;
-        box-shadow: 0 3px 12px rgba(15, 23, 42, 0.05);
-    }
-
-    .kpi-label {
-        color: #6b7280;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-
-    .kpi-value {
-        color: #111827;
-        font-size: 1.75rem;
-        font-weight: 800;
-        margin-top: 6px;
-    }
-
-    .kpi-note {
-        color: #9ca3af;
-        font-size: 0.75rem;
-        margin-top: 2px;
-    }
-
-    .status {
-        display: inline-block;
-        padding: 5px 11px;
-        border-radius: 999px;
-        background: #ecfdf5;
-        color: #047857;
-        font-size: 0.78rem;
-        font-weight: 700;
-    }
-
-    div[data-testid="stMetric"] {
-        background: white;
-        border: 1px solid #e5e7eb;
-        padding: 14px;
-        border-radius: 14px;
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
-    }
-
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-    }
+    .hero-title { font-size:1.95rem; font-weight:800; color:#fff; }
+    .hero-sub { margin-top:6px; color:#d6e0e6; font-size:.92rem; }
+    .badge { display:inline-block; margin-right:8px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,.12); color:#fff; font-size:.75rem; font-weight:700; }
+    .section-title { font-size:1.22rem; font-weight:800; color:#17212b; margin:1.1rem 0 .65rem; }
+    .kpi { background:#fff; border:1px solid #e2e8ed; border-radius:18px; padding:18px 20px; min-height:118px; box-shadow:0 7px 20px rgba(23,33,43,.06); }
+    .kpi-label { font-size:.83rem; color:#71808c; font-weight:700; }
+    .kpi-value { font-size:1.72rem; color:#17212b; font-weight:800; margin-top:5px; }
+    .kpi-note { font-size:.72rem; color:#98a5ae; margin-top:3px; }
+    .card { background:#fff; border:1px solid #e2e8ed; border-radius:18px; padding:18px; box-shadow:0 7px 20px rgba(23,33,43,.05); }
+    .cat-booking { border-right:5px solid #2f80ed; }
+    .cat-contract { border-right:5px solid #1f9d73; }
+    .cat-cancel { border-right:5px solid #d95c5c; }
+    .small-tag { display:inline-block; padding:5px 10px; border-radius:999px; background:#edf3f6; color:#315364; font-size:.75rem; font-weight:700; }
+    .notice { background:#fff8e6; border:1px solid #f1dfad; color:#755d19; border-radius:14px; padding:12px 14px; }
+    div[data-testid="stMetric"] { background:#fff; border:1px solid #e2e8ed; border-radius:14px; }
+    .block-container { padding-top:1.4rem; padding-bottom:3rem; }
+    button[kind="primary"] { border-radius:10px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
 # =========================================================
-# GOOGLE SHEETS HELPERS
+# TEXT / STRUCTURE HELPERS
 # =========================================================
-def extract_sheet_id(url_or_id: str) -> str:
-    value = str(url_or_id).strip()
-    match = re.search(r"/d/([a-zA-Z0-9-_]+)", value)
-    return match.group(1) if match else value
+def clean(v) -> str:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return ""
+    return str(v).strip()
 
 
-def build_csv_url(sheet_id: str, tab_name: str) -> str:
-    return (
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        f"/gviz/tq?tqx=out:csv&sheet={quote(tab_name)}"
-    )
+def norm(v) -> str:
+    s = clean(v)
+    s = re.sub(r"[\u064B-\u065F\u0670\u0640\u200f\u200e\s]+", "", s)
+    s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    s = s.replace("ى", "ي").lower()
+    return s
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_tab_raw(sheet_id: str, tab_name: str) -> pd.DataFrame | None:
-    """Read one Google Sheet tab without changing the source layout.
-
-    We prefer Google's XLSX export because it preserves the real worksheet
-    structure (including blank rows and the two-row headers used by the
-    monthly sheets). Gviz CSV is kept as a fallback.
-    """
-    import urllib.request
-
-    # 1) Full XLSX export: most faithful to the workbook.
-    try:
-        export_url = (
-            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-        )
-        with urllib.request.urlopen(export_url, timeout=30) as response:
-            content = response.read()
-
-        book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
-        # Match tab names exactly first, then case-insensitively.
-        actual = tab_name
-        if actual not in book.sheet_names:
-            matches = [s for s in book.sheet_names if s.strip().lower() == tab_name.strip().lower()]
-            if not matches:
-                return None
-            actual = matches[0]
-
-        return pd.read_excel(
-            book,
-            sheet_name=actual,
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-        ).fillna("")
-    except Exception:
-        pass
-
-    # 2) CSV fallback.
-    try:
-        url = build_csv_url(sheet_id, tab_name)
-        return pd.read_csv(
-            url,
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-        ).fillna("")
-    except Exception:
+def section_from_row(row) -> str | None:
+    """A section banner is short and mostly empty; data notes may contain the same words."""
+    vals = [clean(v) for v in row.tolist() if clean(v)]
+    if not vals or len(vals) > 4:
         return None
-
-
-def clean_text(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-# =========================================================
-# TABLE PARSING
-# =========================================================
-def normalize_arabic_text(value) -> str:
-    """Normalize Arabic text so section names are detected despite
-    extra spaces, hamza/diacritic differences, or singular/plural wording."""
-    text = clean_text(value)
-    if not text:
-        return ""
-
-    # Remove Arabic diacritics and Tatweel (ـ). The source uses long
-    # decorative section titles such as "التعاقدــــــــــــات".
-    text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", text)
-    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-    text = text.replace("ى", "ي")
-    text = re.sub(r"[\s\u200f\u200e]+", "", text)
-    text = re.sub(r"[|:_\-–—/\\]+", "", text)
-    return text.strip().lower()
-
-
-SECTION_ALIASES = {
-    "الحجوزات": {
-        normalize_arabic_text(x) for x in
-        ["الحجوزات", "حجوزات", "الحجز", "حجز"]
-    },
-    "التعاقدات": {
-        normalize_arabic_text(x) for x in
-        ["التعاقدات", "تعاقدات", "التعاقد", "تعاقد", "العقود", "عقود"]
-    },
-    "الالغاءات": {
-        normalize_arabic_text(x) for x in
-        ["الالغاءات", "الإلغاءات", "الغاءات", "إلغاءات", "الالغاء", "الإلغاء", "الغاء", "إلغاء"]
-    },
-}
-
-
-def find_section_rows(raw_df: pd.DataFrame) -> dict:
-    """Find the actual section banner rows in the monthly worksheet."""
-    positions = {}
-
-    for idx, row in raw_df.iterrows():
-        cells = [normalize_arabic_text(v) for v in row if clean_text(v)]
-        text = " ".join(cells)
-        compact = "".join(cells)
-
-        if ("حجز" in compact) or ("حجوز" in compact):
-            positions.setdefault("الحجوزات", idx)
-
-        # The source contains forms such as التعاقدات and التعاقدــــات.
-        if ("تعاقد" in compact) or ("عقد" in compact):
-            positions.setdefault("التعاقدات", idx)
-
-        # The source contains الالغاءات with many Tatweel characters.
-        if ("الغاء" in compact) or ("الالغاء" in compact):
-            positions.setdefault("الالغاءات", idx)
-
-    return positions
-
-
-def make_section_columns(raw_df: pd.DataFrame, header_row: int) -> list[str]:
-    """Build readable column names from the two header rows.
-
-    Example:
-        بيانات الوحده + رقم العمارة -> رقم العمارة
-        بيانات الوحده + رقم الوحده  -> رقم الوحده
-
-    Top-level headers are retained when there is no sub-header.
-    """
-    width = raw_df.shape[1]
-    top = [clean_text(v) for v in raw_df.iloc[header_row, :width]]
-    sub = (
-        [clean_text(v) for v in raw_df.iloc[header_row + 1, :width]]
-        if header_row + 1 < len(raw_df)
-        else [""] * width
-    )
-
-    names = []
-    for i in range(width):
-        t, s = top[i], sub[i]
-        if s:
-            name = s
-        elif t:
-            name = t
-        else:
-            name = f"عمود {i + 1}"
-
-        names.append(name)
-
-    # Unique names, preserving every source column.
-    counts = {}
-    unique = []
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-        unique.append(name if counts[name] == 1 else f"{name} ({counts[name]})")
-
-    return unique
-
-
-def extract_section_table(
-    raw_df: pd.DataFrame,
-    section_row: int,
-    next_section_row: int | None,
-) -> pd.DataFrame:
-    """Extract a section without assuming a fixed number of header rows.
-
-    Some tabs have a two-row header, while others can effectively behave like
-    a one-row header. The important rule is: find the real row containing
-    ``م`` first, then start records immediately after the actual header rows.
-    This prevents the first real record from being skipped.
-    """
-    end = next_section_row if next_section_row is not None else len(raw_df)
-    if section_row + 1 >= end:
-        return pd.DataFrame()
-
-    # Find the real header row inside this section.
-    header_row = None
-    search_end = min(end, section_row + 8)
-    for r in range(section_row + 1, search_end):
-        vals = [normalize_arabic_text(v) for v in raw_df.iloc[r].tolist()]
-        if any(v == "م" for v in vals) or any("كود العميل" in v for v in vals):
-            header_row = r
-            break
-
-    if header_row is None:
-        return pd.DataFrame()
-
-    # A second header row exists when it contains unit-field labels such as
-    # رقم العمارة / رقم الوحده / المساحه. Otherwise the header is one row.
-    subheader_row = None
-    if header_row + 1 < end:
-        vals = [normalize_arabic_text(v) for v in raw_df.iloc[header_row + 1].tolist()]
-        subheader_markers = ("رقم العمارة", "رقم الوحده", "المساحه", "اسم المرحلة", "المشروع")
-        if any(any(marker in v for marker in subheader_markers) for v in vals):
-            subheader_row = header_row + 1
-
-    columns = make_section_columns(raw_df, header_row)
-    data_start = (subheader_row + 1) if subheader_row is not None else (header_row + 1)
-    data = raw_df.iloc[data_start:end, :len(columns)].copy()
-    data.columns = columns
-
-    if data.empty:
-        return pd.DataFrame(columns=columns)
-
-    # Remove completely empty rows.
-    data = data.loc[data.apply(lambda row: any(clean_text(v) for v in row), axis=1)].copy()
-
-    # Do NOT require the first column to be numeric. A valid first record can
-    # contain a text-formatted serial after Google export. Keep any row whose
-    # first cell is populated, while excluding obvious totals/headers.
-    first_col = data.iloc[:, 0].map(clean_text)
-    normalized_first = first_col.map(normalize_arabic_text)
-    keep = first_col.ne("")
-    keep &= ~normalized_first.str.contains(r"اجمال|الإجمال|الاجمال|total|مجموع", case=False, regex=True, na=False)
-    keep &= ~normalized_first.eq("م")
-    data = data.loc[keep].copy()
-
-    for col in data.columns:
-        data[col] = data[col].map(clean_text)
-
-    return data.reset_index(drop=True)
-
-
-def parse_month_tab(raw_df: pd.DataFrame) -> dict:
-    """Parse a monthly tab using its explicit three sections."""
-    result = {
-        "الحجوزات": pd.DataFrame(),
-        "التعاقدات": pd.DataFrame(),
-        "الالغاءات": pd.DataFrame(),
-    }
-
-    positions = find_section_rows(raw_df)
-    ordered = sorted(positions.items(), key=lambda x: x[1])
-
-    for i, (category, section_row) in enumerate(ordered):
-        next_row = ordered[i + 1][1] if i + 1 < len(ordered) else None
-        result[category] = extract_section_table(
-            raw_df,
-            section_row,
-            next_row,
-        )
-
-    return result
-
-
-# =========================================================
-# DATA NORMALIZATION
-# =========================================================
-def normalize_column_name(name: str) -> str:
-    return re.sub(
-        r"\s+",
-        " ",
-        clean_text(name),
-    ).strip()
-
-
-def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    df.columns = [
-        normalize_column_name(c)
-        for c in df.columns
-    ]
-
-    # Remove duplicate-looking columns safely.
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    return df
-
-
-def find_column(df: pd.DataFrame, keywords) -> str | None:
-    for col in df.columns:
-        text = clean_text(col).lower()
-
-        for keyword in keywords:
-            if keyword.lower() in text:
-                return col
-
+    text = norm(" ".join(vals))
+    if "حجوز" in text or text in {"حجز", "الحجز"}:
+        return "الحجوزات"
+    if "تعاقد" in text or text in {"عقد", "عقود", "العقد"}:
+        return "التعاقدات"
+    if "الغاء" in text or "الغاءات" in text:
+        return "الالغاءات"
     return None
 
 
-def numeric_series(df: pd.DataFrame, column: str | None):
-    if not column or column not in df.columns:
-        return pd.Series(
-            np.nan,
-            index=df.index,
-            dtype=float,
-        )
-
-    values = (
-        df[column]
-        .astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("٬", "", regex=False)
-        .str.replace("،", "", regex=False)
-        .str.replace(" ", "", regex=False)
-    )
-
-    return pd.to_numeric(
-        values,
-        errors="coerce",
-    )
-
-
-# =========================================================
-# SEARCH / FILTERS
-# =========================================================
-def apply_filters(
-    df: pd.DataFrame,
-    search_text: str,
-    selected_filters: dict,
-) -> pd.DataFrame:
-
-    result = df.copy()
-
-    if search_text.strip():
-        query = search_text.strip().lower()
-
-        mask = pd.Series(
-            False,
-            index=result.index,
-        )
-
-        for col in result.columns:
-            mask |= (
-                result[col]
-                .astype(str)
-                .str.lower()
-                .str.contains(
-                    query,
-                    regex=False,
-                    na=False,
-                )
-            )
-
-        result = result[mask]
-
-    for col, selected_values in selected_filters.items():
-        if (
-            col in result.columns
-            and selected_values
-        ):
-            result = result[
-                result[col]
-                .astype(str)
-                .isin(selected_values)
-            ]
-
+def find_section_rows(raw: pd.DataFrame):
+    found = []
+    for i in range(len(raw)):
+        kind = section_from_row(raw.iloc[i])
+        if kind:
+            found.append((i, kind))
+    # keep the real section sequence; ignore duplicate accidental matches close together
+    result = []
+    last_row = -100
+    for row, kind in sorted(found, key=lambda x: x[0]):
+        if row - last_row >= 3:
+            result.append((row, kind))
+            last_row = row
     return result
 
+
+def looks_like_header(row) -> bool:
+    vals = [norm(v) for v in row.tolist()]
+    return (
+        len(vals) > 2
+        and vals[0] == "م"
+        and any("اسمالعميل" in v for v in vals)
+        and any("كودالعميل" in v for v in vals)
+    )
+
+
+def find_header_row(raw, section_row, end_row):
+    for r in range(section_row + 1, min(end_row, section_row + 10)):
+        if looks_like_header(raw.iloc[r]):
+            return r
+    return None
+
+
+def is_subheader(row) -> bool:
+    vals = [norm(v) for v in row.tolist() if norm(v)]
+    markers = ("رقمالعمارة", "رقمالوحده", "المساحه", "الحديقه", "اسمالمرحله", "المشروع")
+    return sum(any(m in v for m in markers) for v in vals) >= 2
+
+
+def build_columns(raw, header_row, subheader_row):
+    width = raw.shape[1]
+    top = [clean(x) for x in raw.iloc[header_row, :width]]
+    sub = [clean(x) for x in raw.iloc[subheader_row, :width]] if subheader_row is not None else [""] * width
+    names = []
+    for i in range(width):
+        # Subheader is the actual name for unit-detail columns; otherwise use the main header.
+        name = sub[i] or top[i] or f"عمود {i+1}"
+        names.append(name)
+    seen = {}
+    out = []
+    for n in names:
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n} ({seen[n]})")
+    return out
+
+
+def extract_section(raw, section_row, next_section_row):
+    end = next_section_row if next_section_row is not None else len(raw)
+    h = find_header_row(raw, section_row, end)
+    if h is None:
+        return pd.DataFrame(), {"section_row": section_row + 1, "header_row": None, "subheader_row": None}
+
+    sub = h + 1 if h + 1 < end and is_subheader(raw.iloc[h + 1]) else None
+    cols = build_columns(raw, h, sub)
+    start = sub + 1 if sub is not None else h + 1
+    data = raw.iloc[start:end, :len(cols)].copy()
+    data.columns = cols
+
+    # Valid source records have a populated serial in column A. This removes blank/total rows
+    # without requiring the serial to be numeric.
+    first = data.iloc[:, 0].map(clean) if not data.empty else pd.Series(dtype=str)
+    nfirst = first.map(norm)
+    keep = first.ne("") & ~nfirst.isin({"م", "total", "totals"})
+    keep &= ~nfirst.str.contains("اجمال|مجموع", regex=True, na=False)
+    data = data.loc[keep].copy()
+
+    for c in data.columns:
+        data[c] = data[c].map(clean)
+
+    return data.reset_index(drop=True), {
+        "section_row": section_row + 1,
+        "header_row": h + 1,
+        "subheader_row": sub + 1 if sub is not None else None,
+    }
+
+
+def parse_month(raw):
+    result = {c: pd.DataFrame() for c in CATEGORIES}
+    diagnostics = {c: {} for c in CATEGORIES}
+    sections = find_section_rows(raw)
+    for i, (section_row, category) in enumerate(sections):
+        # only first occurrence of each real category is used
+        if not result[category].empty or diagnostics[category].get("section_row"):
+            continue
+        nxt = sections[i + 1][0] if i + 1 < len(sections) else None
+        result[category], diagnostics[category] = extract_section(raw, section_row, nxt)
+    return result, diagnostics, sections
+
+# =========================================================
+# GOOGLE SHEETS LOADING
+# =========================================================
+
+def xlsx_export_url(sheet_id):
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+
+def csv_export_url(sheet_id, tab):
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(tab)}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_tab(tab_name):
+    """Load the exact worksheet as raw cells. XLSX first; CSV fallback."""
+    errors = []
+    try:
+        req = urllib.request.Request(
+            xlsx_export_url(SHEET_ID),
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            content = r.read()
+        book = pd.ExcelFile(BytesIO(content), engine="openpyxl")
+        actual = next((s for s in book.sheet_names if s == tab_name), None)
+        if actual is None:
+            actual = next((s for s in book.sheet_names if s.strip().lower() == tab_name.strip().lower()), None)
+        if actual is None:
+            raise ValueError(f"Tab not found: {tab_name}")
+        df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False)
+        return df.fillna(""), "xlsx", None
+    except Exception as e:
+        errors.append(str(e))
+
+    try:
+        req = urllib.request.Request(
+            csv_export_url(SHEET_ID, tab_name),
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            df = pd.read_csv(r, header=None, dtype=str, keep_default_na=False)
+        return df.fillna(""), "csv", None
+    except Exception as e:
+        errors.append(str(e))
+
+    return None, None, " | ".join(errors[-2:])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_all_months():
+    all_rows = []
+    diagnostics = {}
+    raw_sizes = {}
+    failures = []
+    for month, tab in MONTH_TAB_MAP.items():
+        raw, source, err = load_tab(tab)
+        if raw is None:
+            failures.append(f"{month} ({tab})")
+            continue
+        raw_sizes[month] = (len(raw), raw.shape[1], source)
+        parsed, diag, sections = parse_month(raw)
+        diagnostics[month] = {"tab": tab, "diagnostics": diag, "sections": [(r + 1, k) for r, k in sections]}
+        for category, frame in parsed.items():
+            if frame.empty:
+                continue
+            x = frame.copy()
+            x.insert(0, "الشهر", month)
+            x.insert(1, "النوع", category)
+            x.insert(len(x.columns), "__record_id__", [f"src:{month}:{category}:{i}" for i in range(len(x))])
+            all_rows.append(x)
+    if all_rows:
+        union = pd.concat(all_rows, ignore_index=True, sort=False).fillna("")
+    else:
+        union = pd.DataFrame()
+    return union, diagnostics, raw_sizes, failures
+
+# =========================================================
+# DATA DISPLAY HELPERS
+# =========================================================
+def numeric_value(series):
+    s = (
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("،", "", regex=False)
+        .str.replace("٬", "", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    return pd.to_numeric(s, errors="coerce")
+
+
+def find_col(df, names):
+    for c in df.columns:
+        nc = norm(c)
+        for n in names:
+            if norm(n) in nc:
+                return c
+    return None
+
+
+def money_col(df):
+    return find_col(df, ["اجمالي الوحده", "اجمالي الوحدة", "مبلغ المقدم", "مبلع الحجز", "اجمالي"])
+
+
+def area_col(df):
+    return find_col(df, ["المساحه", "المساحة"])
+
+
+def prepare_view(df):
+    """Readable copy for UI only; source dataframe is not changed."""
+    out = df.copy()
+    date_words = ["تاريخ"]
+    for c in out.columns:
+        if any(w in clean(c) for w in date_words):
+            # Handle Excel serial dates while preserving ordinary text dates.
+            nums = pd.to_numeric(out[c], errors="coerce")
+            converted = pd.Series(out[c], index=out.index, dtype="object")
+            mask = nums.between(30000, 60000)
+            if mask.any():
+                dt = pd.to_datetime(nums, unit="D", origin="1899-12-30", errors="coerce")
+                converted.loc[mask] = dt.loc[mask].dt.strftime("%Y-%m-%d")
+            out[c] = converted
+    return out
+
+
+def reorder_columns(df):
+    priority = [
+        "الشهر", "النوع", "م", "كود العميل", "كود العميل  / رقم التليفون",
+        "اسم العميل", "تيم ليدر", "رقم العمارة", "رقم الوحده", "المساحه",
+        "الحديقه", "اسم المرحلة", "المشروع", "مصدر العميل", "اسم شركه البروكر",
+        "بروكر", "اجمالي الوحده", "تاريخ الحجز", "تاريخ التعاقد", "تاريخ الالغاء",
+        "تاريخ نزول العميل", "المقدم", "مبلع الحجز", " مبلغ المقدم ", "طريقة الدفع",
+        "طريقه الدفع", "سعر المتر", "نسبه المقدم", "اسم البائع", "ملحوظات", "سبب الاسترداد",
+    ]
+    front = []
+    for p in priority:
+        for c in df.columns:
+            if c == p and c not in front:
+                front.append(c)
+    rest = [c for c in df.columns if c not in front]
+    return df[front + rest]
+
+# =========================================================
+# LOCAL EDIT / ADD / DELETE LAYER
+# =========================================================
+EDIT_FILE = Path("el_moltqa_changes.json")
+
+def load_changes():
+    try:
+        if EDIT_FILE.exists():
+            data=json.loads(EDIT_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"added": [], "deleted": [], "updated": {}, "months": []}
+
+def save_changes(changes):
+    EDIT_FILE.write_text(json.dumps(changes, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def row_key(row):
+    # Prefer an immutable internal ID so edits remain editable/deletable even
+    # after the visible fields change.
+    rid = clean(row.get("__record_id__", ""))
+    if rid:
+        return rid
+    parts=[clean(row.get("الشهر","")), clean(row.get("النوع","")), clean(row.get("م","")), clean(row.get("كود العميل","")), clean(row.get("اسم العميل","")), clean(row.get("رقم الوحده",""))]
+    return "|".join(parts)
+
+def apply_changes(base):
+    changes=load_changes()
+    df=base.copy()
+    if df.empty:
+        return df, changes
+    df["__key__"]=df.apply(row_key, axis=1)
+    deleted=set(changes.get("deleted", []))
+    if deleted:
+        df=df[~df["__key__"].isin(deleted)].copy()
+    updates=changes.get("updated", {}) or {}
+    if updates:
+        for key, vals in updates.items():
+            mask=df["__key__"].eq(key)
+            for col,val in vals.items():
+                if col in df.columns:
+                    df.loc[mask,col]=val
+    added=pd.DataFrame(changes.get("added", []))
+    if not added.empty:
+        for c in df.columns:
+            if c not in added.columns:
+                added[c]=""
+        for c in added.columns:
+            if c not in df.columns and c != "__key__":
+                df[c]=""
+        if "__record_id__" not in added.columns:
+            added["__record_id__"]=[f"add:{uuid.uuid4().hex}" for _ in range(len(added))]
+        else:
+            added["__record_id__"]=added["__record_id__"].map(clean)
+            added.loc[added["__record_id__"].eq(""),"__record_id__"]=[f"add:{uuid.uuid4().hex}" for _ in range(int(added["__record_id__"].eq("").sum()))]
+        added["__key__"]=added.apply(row_key, axis=1)
+        if "__record_id__" not in df.columns:
+            df["__record_id__"]=""
+        df=pd.concat([df, added[df.columns]], ignore_index=True, sort=False)
+    return df, changes
+
+def register_updated(changes, original_row, new_values):
+    key=row_key(original_row)
+    changes.setdefault("updated", {})[key]=new_values
+    save_changes(changes)
+
+def register_deleted(changes, row):
+    key=row_key(row)
+    changes.setdefault("deleted", []).append(key)
+    changes["deleted"]=list(dict.fromkeys(changes["deleted"]))
+    save_changes(changes)
+
+def register_added(changes, row):
+    row = dict(row)
+    row.setdefault("__record_id__", f"add:{uuid.uuid4().hex}")
+    changes.setdefault("added", []).append(row)
+    save_changes(changes)
+
+def reset_local_changes():
+    save_changes({"added": [], "deleted": [], "updated": {}, "months": []})
+
+def load_custom_months():
+    changes = load_changes()
+    custom = changes.get("months", []) or []
+    for item in custom:
+        name = clean(item.get("name", "")) if isinstance(item, dict) else ""
+        tab = clean(item.get("tab", "")) if isinstance(item, dict) else ""
+        if name and name not in MONTH_TAB_MAP:
+            MONTH_TAB_MAP[name] = tab or name
+            MONTHS.append(name)
+
+def next_serial(df):
+    if "م" not in df.columns or df.empty:
+        return 1
+    nums=pd.to_numeric(df["م"], errors="coerce")
+    return int(nums.max())+1 if nums.notna().any() else len(df)+1
+
+def compact_columns(df):
+    preferred=["الشهر","النوع","م","كود العميل","اسم العميل","تيم ليدر","رقم العمارة","رقم الوحده","المساحه","اسم المرحلة","المشروع","مصدر العميل","تاريخ الحجز","تاريخ التعاقد","تاريخ الالغاء","اجمالي الوحده","المقدم","مبلع الحجز","طريقة الدفع","اسم البائع","ملحوظات"]
+    cols=[c for c in preferred if c in df.columns]
+    cols += [c for c in df.columns if c not in cols and c != "__key__"]
+    return cols
+
+def add_management_ui(all_data, changes):
+    st.markdown("<div class='section-title'>إدارة البيانات</div>", unsafe_allow_html=True)
+    tabs=st.tabs(["➕ إضافة شهر","➕ إضافة سجل","✏️ تعديل","🗑️ حذف"])
+
+    with tabs[0]:
+        with st.form("add_month_form", clear_on_submit=True):
+            new_month=st.text_input("اسم الشهر / الفترة", placeholder="مثال: أكتوبر")
+            new_tab=st.text_input("اسم الـ Tab في Google Sheet (اختياري)", placeholder="مثال: Oct")
+            create=st.form_submit_button("إضافة الشهر", type="primary", use_container_width=True)
+        if create and new_month.strip():
+            if new_month.strip() in MONTHS:
+                st.warning("هذا الشهر موجود بالفعل.")
+            else:
+                MONTHS.append(new_month.strip())
+                MONTH_TAB_MAP[new_month.strip()]=new_tab.strip() or new_month.strip()
+                changes.setdefault("months", []).append({"name":new_month.strip(),"tab":new_tab.strip() or new_month.strip()})
+                save_changes(changes)
+                st.success(f"تمت إضافة {new_month.strip()} داخل التطبيق. يمكنك بعد ذلك إضافة سجلات له.")
+                st.rerun()
+        st.caption("الشهر المضاف هنا يضاف كطبقة داخل التطبيق، ولا يغيّر Google Sheet تلقائيًا.")
+
+    with tabs[1]:
+        month_options=MONTHS
+        cat_options=CATEGORIES
+        with st.form("add_record_form", clear_on_submit=True):
+            a1,a2=st.columns(2)
+            with a1: month=st.selectbox("الشهر", month_options, key="add_month")
+            with a2: cat=st.selectbox("القسم", cat_options, key="add_cat")
+            source=all_data[all_data["النوع"].eq(cat)] if not all_data.empty else pd.DataFrame()
+            cols=[c for c in compact_columns(source) if c not in {"الشهر","النوع","__key__"}]
+            common=[c for c in ["م","كود العميل","اسم العميل","تيم ليدر","رقم العمارة","رقم الوحده","المساحه","اسم المرحلة","المشروع","مصدر العميل","تاريخ الحجز","تاريخ التعاقد","تاريخ الالغاء","اجمالي الوحده","المقدم","مبلع الحجز","طريقة الدفع","اسم البائع","ملحوظات"] if c in cols]
+            fields={}
+            if not common: common=["م","اسم العميل","رقم الوحده","ملحوظات"]
+            grid=st.columns(2)
+            for i,c in enumerate(common):
+                with grid[i%2]:
+                    fields[c]=st.text_input(c, value=str(next_serial(source)) if c=="م" else "", key=f"add_{c}")
+            extra=st.text_area("ملاحظات إضافية (اختياري)", key="add_extra")
+            add=st.form_submit_button("إضافة السجل", type="primary", use_container_width=True)
+        if add:
+            row={c:fields.get(c,"") for c in common}
+            row["الشهر"]=month; row["النوع"]=cat
+            if extra:
+                row["ملحوظات"]=extra
+            register_added(changes,row)
+            st.success("تمت إضافة السجل وحفظه محليًا.")
+            st.rerun()
+
+    with tabs[2]:
+        candidates=all_data.copy()
+        if not candidates.empty:
+            edit_q=st.text_input("بحث سريع عن السجل", placeholder="اسم العميل أو رقم الوحدة أو الكود...", key="edit_q")
+            if edit_q.strip():
+                q=edit_q.strip().lower()
+                mask=candidates.astype(str).apply(lambda col: col.str.lower().str.contains(q,regex=False,na=False)).any(axis=1)
+                candidates=candidates.loc[mask].copy()
+            candidates["_label"]=candidates.apply(lambda r: f"{r.get('الشهر','')} | {r.get('النوع','')} | {r.get('م','')} | {r.get('اسم العميل','')}",axis=1)
+            if candidates.empty:
+                st.info("لا توجد سجلات مطابقة للبحث.")
+                return
+            selected_label=st.selectbox("اختار السجل", candidates["_label"].tolist(), key="edit_select")
+            pos=candidates.index[candidates["_label"].eq(selected_label)][0]
+            original=candidates.loc[pos].to_dict()
+            edit_cols=[c for c in compact_columns(candidates) if c not in {"الشهر","النوع","__key__"}]
+            edit_values={}
+            with st.form("edit_record_form"):
+                ec=st.columns(2)
+                for i,c in enumerate(edit_cols[:20]):
+                    with ec[i%2]:
+                        edit_values[c]=st.text_input(c,value=clean(original.get(c,"")),key=f"edit_{c}")
+                save=st.form_submit_button("حفظ التعديل",type="primary",use_container_width=True)
+            if save:
+                register_updated(changes, original, edit_values)
+                st.success("تم تعديل السجل وحفظ التغيير.")
+                st.rerun()
+        else:
+            st.info("لا توجد سجلات للتعديل.")
+
+    with tabs[3]:
+        candidates=all_data.copy()
+        if not candidates.empty:
+            delete_q=st.text_input("بحث سريع عن السجل", placeholder="اسم العميل أو رقم الوحدة أو الكود...", key="delete_q")
+            if delete_q.strip():
+                q=delete_q.strip().lower()
+                mask=candidates.astype(str).apply(lambda col: col.str.lower().str.contains(q,regex=False,na=False)).any(axis=1)
+                candidates=candidates.loc[mask].copy()
+            candidates["_label"]=candidates.apply(lambda r: f"{r.get('الشهر','')} | {r.get('النوع','')} | {r.get('م','')} | {r.get('اسم العميل','')}",axis=1)
+            if candidates.empty:
+                st.info("لا توجد سجلات مطابقة للبحث.")
+                return
+            selected_label=st.selectbox("اختار السجل للحذف", candidates["_label"].tolist(), key="delete_select")
+            pos=candidates.index[candidates["_label"].eq(selected_label)][0]
+            row=candidates.loc[pos].to_dict()
+            st.warning("الحذف هنا يحذف السجل من طبقة التطبيق المحلية فقط، ولن يحذف صفًا من Google Sheet.")
+            if st.button("حذف السجل", type="primary", use_container_width=True):
+                register_deleted(changes,row)
+                st.success("تم حذف السجل من العرض.")
+                st.rerun()
+
+    if st.button("↩️ إزالة كل التعديلات المحلية والعودة للمصدر", use_container_width=True):
+        reset_local_changes(); st.success("تمت إزالة التعديلات المحلية."); st.rerun()
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
-
-    sheet_id = extract_sheet_id(SHEET_URL)
-
-    # -----------------------------------------------------
-    # SIDEBAR
-    # -----------------------------------------------------
+    load_custom_months()
     with st.sidebar:
+        st.markdown("<div style='font-size:25px;font-weight:800;'>EL MOLTQA</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#9ca3af;font-size:12px;margin-bottom:18px;'>Operations & Sales</div>", unsafe_allow_html=True)
 
-        st.markdown(
-            """
-            <div style="
-                font-size:24px;
-                font-weight:800;
-                margin-bottom:2px;
-            ">
-                EL MOLTQA
-            </div>
-            <div style="
-                color:#9ca3af;
-                font-size:12px;
-                margin-bottom:20px;
-            ">
-                Sales & Contracts Dashboard
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### البيانات")
-
-        selected_month = st.selectbox(
-            "الشهر",
-            MONTHS_AR,
-            index=0,
-        )
-
-        selected_category = st.selectbox(
-            "نوع البيانات",
-            list(CATEGORIES.keys()),
-            format_func=lambda c: (
-                f"{CATEGORIES[c]}  {c}"
-            ),
-        )
-
-        st.divider()
-
-        st.markdown("### التحكم")
-
-        if st.button(
-            "🔄 تحديث البيانات",
-            use_container_width=True,
-        ):
+        if st.button("🔄 تحديث البيانات", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-        st.caption(
-            "يتم تحديث البيانات تلقائياً من Google Sheets "
-            "كل 5 دقائق، ويمكنك التحديث يدوياً في أي وقت."
-        )
-
         st.divider()
-
-        st.markdown("### مصدر البيانات")
-
-        st.success(
-            "متصل بمصدر Google Sheets"
-        )
-
-        st.caption(
-            "إذا لم تظهر البيانات، تأكد أن الشيت "
-            "متاح للمشاهدة لأي شخص لديه الرابط."
-        )
-
-    # -----------------------------------------------------
-    # LOAD
-    # -----------------------------------------------------
-    # The visible month names are Arabic, while the actual Google Sheet tabs
-    # use the names JAN/FEB/MAR/April/May/june/July/Aug/SEP.
-    tab_name = MONTH_TAB_MAP[selected_month]
-
-    with st.spinner(
-        f"جاري تحميل بيانات {tab_name}..."
-    ):
-        raw_df = fetch_tab_raw(
-            sheet_id,
-            tab_name,
-        )
-
-    if raw_df is None:
-        st.error(
-            f"تعذر تحميل ورقة **{tab_name}**."
-        )
-
-        st.info(
-            "تأكد من أن Google Sheet مضبوط على "
-            "**Anyone with the link → Viewer** "
-            "وأن اسم الـ Tab مطابق لاسم الشهر."
-        )
-
-        with st.expander("رابط مصدر البيانات"):
-            st.code(SHEET_URL)
-
-        return
-
-    sections = parse_month_tab(raw_df)
-
-    df = sections.get(
-        selected_category,
-        pd.DataFrame(),
-    )
-
-    df = normalize_dataframe(df)
-
-    # -----------------------------------------------------
-    # HEADER
-    # -----------------------------------------------------
-    st.markdown(
-        '<div class="main-title">EL MOLTQA</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"""
-        <div class="subtitle">
-            لوحة متابعة {selected_category}
-            — {selected_month}
-            <span class="status">Live Data</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if df.empty:
-        st.warning(
-            f"لا توجد بيانات ظاهرة في قسم {selected_category} "
-            f"داخل ورقة {selected_month}."
-        )
-        return
-
-    # -----------------------------------------------------
-    # SEARCH
-    # -----------------------------------------------------
-    st.markdown(
-        '<div class="section-title">البحث والتصفية</div>',
-        unsafe_allow_html=True,
-    )
-
-    search_col, clear_col = st.columns(
-        [5, 1],
-        vertical_alignment="bottom",
-    )
-
-    with search_col:
-        search_text = st.text_input(
-            "بحث",
-            placeholder=(
-                "ابحث باسم العميل، كود العميل، "
-                "الوحدة، العمارة أو أي قيمة..."
-            ),
+        st.markdown("### العرض")
+        view_mode = st.radio(
+            "",
+            ["نظرة عامة", "الحجوزات", "التعاقدات", "الالغاءات", "كل البيانات", "إدارة البيانات"],
             label_visibility="collapsed",
         )
 
-    with clear_col:
-        clear_filters = st.button(
-            "مسح الفلاتر",
-            use_container_width=True,
-        )
+        selected_month = st.selectbox("الشهر", ["كل الشهور"] + MONTHS)
+        search = st.text_input("بحث", placeholder="العميل، الوحدة، العمارة، Team Leader ...")
 
-    # Detect useful categorical columns.
-    categorical_candidates = []
+        st.divider()
+        st.caption("المصدر: Google Sheets")
+        st.caption("البيانات تُحدّث عند الطلب أو تلقائياً كل 5 دقائق.")
+        st.caption("التعديلات والإضافات المحلية: تُحفظ في el_moltqa_changes.json")
 
-    for col in df.columns:
-        if col == "م":
-            continue
+    with st.spinner("جاري قراءة جميع الشهور والجداول..."):
+        all_data, diagnostics, raw_sizes, failures = load_all_months()
 
-        nunique = (
-            df[col]
-            .astype(str)
-            .replace("", np.nan)
-            .nunique(dropna=True)
-        )
+    all_data, changes = apply_changes(all_data)
 
-        if 1 < nunique <= 30:
-            categorical_candidates.append(col)
+    if all_data.empty:
+        st.error("لم يتم العثور على سجلات. راجعي صلاحية Google Sheet: Anyone with the link → Viewer.")
+        if failures:
+            st.caption("تعذر تحميل: " + ", ".join(failures))
+        return
 
-    categorical_candidates = categorical_candidates[:5]
+    # Base view
+    if view_mode == "إدارة البيانات":
+        st.markdown("<div class='hero'><div class='hero-title'>إدارة البيانات</div><div class='hero-sub'>إضافة شهر، إضافة سجل، تعديل أو حذف — مع الحفاظ على Google Sheet كما هو.</div></div>", unsafe_allow_html=True)
+        add_management_ui(all_data, changes)
+        return
 
-    selected_filters = {}
-
-    if categorical_candidates:
-        filter_cols = st.columns(
-            min(len(categorical_candidates), 5)
-        )
-
-        for i, col in enumerate(
-            categorical_candidates
-        ):
-            values = sorted(
-                [
-                    str(v)
-                    for v in df[col].dropna().unique()
-                    if str(v).strip()
-                ]
-            )
-
-            with filter_cols[i]:
-                selected = st.multiselect(
-                    col,
-                    values,
-                    key=f"filter_{selected_month}_{selected_category}_{col}",
-                )
-
-                selected_filters[col] = (
-                    [] if clear_filters else selected
-                )
-
-    filtered_df = apply_filters(
-        df,
-        search_text,
-        selected_filters,
-    )
-
-    # -----------------------------------------------------
-    # DYNAMIC KPIs
-    # -----------------------------------------------------
-    total_records = len(filtered_df)
-
-    total_column = find_column(
-        filtered_df,
-        [
-            "اجمالي",
-            "إجمالي",
-            "القيمة",
-            "السعر",
-            "مبلغ",
-            "قيمة",
-            "total",
-            "price",
-            "amount",
-        ],
-    )
-
-    area_column = find_column(
-        filtered_df,
-        [
-            "المساحة",
-            "المساحه",
-            "area",
-        ],
-    )
-
-    team_column = find_column(
-        filtered_df,
-        [
-            "تيم ليدر",
-            "team leader",
-            "team",
-        ],
-    )
-
-    total_value = (
-        numeric_series(
-            filtered_df,
-            total_column,
-        ).sum()
-        if total_column
-        else None
-    )
-
-    total_area = (
-        numeric_series(
-            filtered_df,
-            area_column,
-        ).sum()
-        if area_column
-        else None
-    )
-
-    teams_count = (
-        filtered_df[team_column]
-        .astype(str)
-        .replace("", np.nan)
-        .nunique()
-        if team_column
-        else None
-    )
-
-    st.markdown(
-        '<div class="section-title">ملخص البيانات</div>',
-        unsafe_allow_html=True,
-    )
-
-    k1, k2, k3, k4 = st.columns(4)
-
-    with k1:
-        st.markdown(
-            f"""
-            <div class="kpi">
-                <div class="kpi-label">
-                    إجمالي السجلات
-                </div>
-                <div class="kpi-value">
-                    {total_records:,}
-                </div>
-                <div class="kpi-note">
-                    بعد تطبيق البحث والفلاتر
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with k2:
-        value_text = (
-            f"{total_value:,.0f}"
-            if total_value is not None
-            else "—"
-        )
-
-        st.markdown(
-            f"""
-            <div class="kpi">
-                <div class="kpi-label">
-                    إجمالي القيمة
-                </div>
-                <div class="kpi-value">
-                    {value_text}
-                </div>
-                <div class="kpi-note">
-                    {total_column or "لم يتم العثور على عمود قيمة"}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with k3:
-        area_text = (
-            f"{total_area:,.0f}"
-            if total_area is not None
-            else "—"
-        )
-
-        st.markdown(
-            f"""
-            <div class="kpi">
-                <div class="kpi-label">
-                    إجمالي المساحة
-                </div>
-                <div class="kpi-value">
-                    {area_text}
-                </div>
-                <div class="kpi-note">
-                    {area_column or "لم يتم العثور على عمود المساحة"}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with k4:
-        team_text = (
-            f"{teams_count:,}"
-            if teams_count is not None
-            else "—"
-        )
-
-        st.markdown(
-            f"""
-            <div class="kpi">
-                <div class="kpi-label">
-                    عدد الـ Team Leaders
-                </div>
-                <div class="kpi-value">
-                    {team_text}
-                </div>
-                <div class="kpi-note">
-                    القيم المختلفة في البيانات الحالية
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # -----------------------------------------------------
-    # CHARTS
-    # -----------------------------------------------------
-    st.markdown(
-        '<div class="section-title">Insights</div>',
-        unsafe_allow_html=True,
-    )
-
-    chart1, chart2 = st.columns(2)
-
-    with chart1:
-        chart_col = next(
-            (
-                col
-                for col in [
-                    "تيم ليدر",
-                    "مصدر العميل",
-                    "الحالة",
-                    "المرحلة",
-                    "Phase",
-                    "Status",
-                ]
-                if col in filtered_df.columns
-            ),
-            None,
-        )
-
-        if chart_col:
-            counts = (
-                filtered_df[chart_col]
-                .astype(str)
-                .replace("", np.nan)
-                .dropna()
-                .value_counts()
-                .head(10)
-            )
-
-            if not counts.empty:
-                st.markdown(
-                    f"**التوزيع حسب {chart_col}**"
-                )
-                st.bar_chart(counts)
-
-        else:
-            st.info(
-                "لا يوجد عمود تصنيف مناسب لعرض الرسم."
-            )
-
-    with chart2:
-        # Find a numeric column automatically.
-        numeric_candidates = []
-
-        for col in filtered_df.columns:
-            series = numeric_series(
-                filtered_df,
-                col,
-            )
-
-            if series.notna().sum() >= 3:
-                numeric_candidates.append(col)
-
-        if numeric_candidates:
-            chart_numeric_col = st.selectbox(
-                "اختر المؤشر للرسم",
-                numeric_candidates,
-                key=(
-                    f"numeric_chart_"
-                    f"{selected_month}_"
-                    f"{selected_category}"
-                ),
-            )
-
-            values = numeric_series(
-                filtered_df,
-                chart_numeric_col,
-            ).dropna()
-
-            if not values.empty:
-                chart_data = pd.DataFrame(
-                    {
-                        "القيمة": values.values
-                    }
-                )
-
-                st.markdown(
-                    f"**توزيع {chart_numeric_col}**"
-                )
-                st.line_chart(
-                    chart_data,
-                    use_container_width=True,
-                )
-        else:
-            st.info(
-                "لا توجد بيانات رقمية كافية لعرض الرسم."
-            )
-
-    # -----------------------------------------------------
-    # DATA TABLE
-    # -----------------------------------------------------
-    st.markdown(
-        '<div class="section-title">تفاصيل البيانات</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.caption(
-        f"عرض {len(filtered_df):,} سجل من أصل {len(df):,}"
-    )
-
-    if filtered_df.empty:
-        st.warning(
-            "لا توجد نتائج مطابقة للبحث أو الفلاتر."
-        )
+    if view_mode == "نظرة عامة" or view_mode == "كل البيانات":
+        current = all_data.copy()
     else:
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True,
-            height=520,
-        )
+        current = all_data[all_data["النوع"] == view_mode].copy()
 
-    # -----------------------------------------------------
-    # DOWNLOAD
-    # -----------------------------------------------------
+    if selected_month != "كل الشهور":
+        current = current[current["الشهر"] == selected_month].copy()
+
+    if search.strip():
+        q = search.strip().lower()
+        mask = pd.Series(False, index=current.index)
+        for c in current.columns:
+            mask |= current[c].astype(str).str.lower().str.contains(q, regex=False, na=False)
+        current = current.loc[mask].copy()
+
+    # Header
     st.markdown(
-        '<div class="section-title">التصدير</div>',
+        f"<div class='hero'><div class='hero-title'>EL MOLTQA — متابعة المبيعات والعمليات</div>"
+        f"<div class='hero-sub'>بيانات فعلية من الشيت • {('كل الشهور' if selected_month == 'كل الشهور' else selected_month)}"
+        f" <span class='small-tag'>{len(current):,} سجل ظاهر</span></div></div>",
         unsafe_allow_html=True,
     )
 
-    csv_bytes = filtered_df.to_csv(
-        index=False
-    ).encode("utf-8-sig")
+    # =====================================================
+    # OVERVIEW
+    # =====================================================
+    if view_mode == "نظرة عامة":
+        counts = all_data["النوع"].value_counts()
+        total_records = len(all_data)
+        value_column = money_col(all_data)
+        total_value = numeric_value(all_data[value_column]).sum() if value_column else np.nan
+        leaders_col = find_col(all_data, ["تيم ليدر"])
+        leader_count = all_data[leaders_col].replace("", np.nan).nunique() if leaders_col else 0
 
-    excel_buffer = BytesIO()
+        k1,k2,k3,k4 = st.columns(4)
+        cards=[
+            (k1,"إجمالي السجلات",f"{total_records:,}","من كل الشهور والأقسام"),
+            (k2,"الحجوزات",f"{int(counts.get('الحجوزات',0)):,}","كل السجلات المحجوزة"),
+            (k3,"التعاقدات",f"{int(counts.get('التعاقدات',0)):,}","كل السجلات المتعاقد عليها"),
+            (k4,"الإلغاءات",f"{int(counts.get('الالغاءات',0)):,}","كل السجلات الملغاة"),
+        ]
+        for col,label,val,note in cards:
+            with col:
+                st.markdown(f"<div class='kpi'><div class='kpi-label'>{label}</div><div class='kpi-value'>{val}</div><div class='kpi-note'>{note}</div></div>",unsafe_allow_html=True)
 
-    try:
-        with pd.ExcelWriter(
-            excel_buffer,
-            engine="openpyxl",
-        ) as writer:
-            filtered_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="Data",
-            )
+        st.markdown("### ملخص شهري")
+        if selected_month == "كل الشهور":
+            summary = (all_data.groupby(["الشهر","النوع"]).size().unstack(fill_value=0).reindex(MONTHS))
+            for c in CATEGORIES:
+                if c not in summary.columns: summary[c]=0
+            summary = summary[CATEGORIES]
+            st.bar_chart(summary)
 
-        excel_bytes = excel_buffer.getvalue()
-    except Exception:
-        excel_bytes = None
+        c1,c2 = st.columns(2)
+        with c1:
+            st.markdown("#### توزيع الأقسام")
+            st.bar_chart(counts.reindex(CATEGORIES).fillna(0))
+        with c2:
+            st.markdown("#### أكثر Team Leaders ظهوراً")
+            if leaders_col:
+                leaders = all_data[leaders_col].replace("", np.nan).dropna().value_counts().head(10)
+                st.bar_chart(leaders)
+            else:
+                st.info("لا يوجد عمود Team Leader في البيانات الحالية.")
 
-    download_col1, download_col2 = st.columns(2)
+        st.markdown("### أهم الأرقام المتاحة")
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            st.metric("إجمالي القيمة", f"{total_value:,.0f}" if pd.notna(total_value) else "—")
+        with c2:
+            ac = area_col(all_data)
+            area_total = numeric_value(all_data[ac]).sum() if ac else np.nan
+            st.metric("إجمالي المساحة", f"{area_total:,.0f}" if pd.notna(area_total) else "—")
+        with c3:
+            st.metric("عدد Team Leaders", f"{leader_count:,}")
 
-    with download_col1:
+    else:
+        # =================================================
+        # DETAIL VIEW
+        # =================================================
+        if current.empty:
+            st.warning("لا توجد نتائج مطابقة للاختيار الحالي.")
+            return
+
+        # Smart filters based on real columns.
+        st.markdown("### تصفية البيانات")
+        filter_names = ["تيم ليدر", "المشروع", "مصدر العميل", "اسم المرحلة", "اسم البائع"]
+        filters = {}
+        available = [c for c in filter_names if c in current.columns]
+        cols = st.columns(min(5, max(1, len(available)))) if available else []
+        for i,c in enumerate(available[:5]):
+            vals = sorted([x for x in current[c].dropna().astype(str).unique().tolist() if x.strip()])
+            with cols[i]:
+                filters[c] = st.multiselect(c, vals, key=f"f_{view_mode}_{selected_month}_{c}")
+        for c, vals in filters.items():
+            if vals: current = current[current[c].isin(vals)]
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("السجلات", f"{len(current):,}")
+        vc = money_col(current)
+        v = numeric_value(current[vc]).sum() if vc else np.nan
+        c2.metric("إجمالي القيمة", f"{v:,.0f}" if pd.notna(v) else "—")
+        ac = area_col(current)
+        a = numeric_value(current[ac]).sum() if ac else np.nan
+        c3.metric("إجمالي المساحة", f"{a:,.0f}" if pd.notna(a) else "—")
+        lc = find_col(current,["تيم ليدر"])
+        c4.metric("Team Leaders", f"{current[lc].replace('',np.nan).nunique():,}" if lc else "—")
+
+        # Charts based on actual content.
+        ch1,ch2 = st.columns(2)
+        with ch1:
+            by_month = current.groupby("الشهر").size().reindex(MONTHS).fillna(0)
+            st.markdown("#### السجلات حسب الشهر")
+            st.bar_chart(by_month)
+        with ch2:
+            if lc:
+                leaders = current[lc].replace("",np.nan).dropna().value_counts().head(10)
+                st.markdown("#### توزيع Team Leaders")
+                st.bar_chart(leaders)
+            else:
+                st.info("لا يوجد Team Leader في هذا القسم.")
+
+        st.markdown("### البيانات")
+        display = prepare_view(reorder_columns(current))
+        st.dataframe(display, use_container_width=True, hide_index=True, height=620)
+
+        csv_bytes = display.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            "⬇️ تنزيل CSV",
-            data=csv_bytes,
-            file_name=(
-                f"EL_MOLTQA_"
-                f"{selected_category}_"
-                f"{selected_month}.csv"
-            ),
+            "⬇️ تنزيل البيانات الحالية CSV",
+            csv_bytes,
+            file_name=f"EL_MOLTQA_{view_mode}_{selected_month}.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
-    with download_col2:
-        if excel_bytes:
-            st.download_button(
-                "⬇️ تنزيل Excel",
-                data=excel_bytes,
-                file_name=(
-                    f"EL_MOLTQA_"
-                    f"{selected_category}_"
-                    f"{selected_month}.xlsx"
-                ),
-                mime=(
-                    "application/vnd.openxmlformats-"
-                    "officedocument.spreadsheetml.sheet"
-                ),
-                use_container_width=True,
+    # =====================================================
+    # FULL DATA
+    # =====================================================
+    if view_mode == "كل البيانات":
+        st.markdown("### البيانات الكاملة")
+        display = prepare_view(reorder_columns(current))
+        st.dataframe(display, use_container_width=True, hide_index=True, height=680)
+        st.download_button(
+            "⬇️ تنزيل كل البيانات CSV",
+            display.to_csv(index=False).encode("utf-8-sig"),
+            file_name="EL_MOLTQA_All_Data.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    # =====================================================
+    # DIAGNOSTICS — useful, but not in the way
+    # =====================================================
+    with st.expander("فحص مصدر البيانات"):
+        for month in MONTHS:
+            info = diagnostics.get(month, {})
+            sizes = raw_sizes.get(month, (0,0,"-"))
+            st.write(
+                f"**{month}** — Tab `{info.get('tab', '-')}` — "
+                f"{sizes[0]:,} صف × {sizes[1]:,} عمود — مصدر القراءة: `{sizes[2]}`"
             )
-
-    # -----------------------------------------------------
-    # FOOTER / DEBUG
-    # -----------------------------------------------------
-    with st.expander("معلومات المصدر"):
-        st.write(
-            f"Google Sheet ID: `{sheet_id}`"
-        )
-        st.write(
-            f"Tab: `{tab_name}`"
-        )
-        st.write(
-            f"Section: `{selected_category}`"
-        )
-        st.write(
-            f"Raw rows loaded: `{len(raw_df):,}`"
-        )
-
-        st.caption(
-            "هذه المعلومات للمساعدة في فحص الاتصال فقط."
-        )
+            d = info.get("diagnostics", {})
+            for cat in CATEGORIES:
+                x = d.get(cat, {})
+                if x.get("header_row"):
+                    st.caption(
+                        f"{ICON[cat]} {cat}: section {x.get('section_row')}, "
+                        f"header {x.get('header_row')}, "
+                        f"subheader {x.get('subheader_row') or 'بدون'}"
+                    )
+        if failures:
+            st.warning("تعذر تحميل: " + ", ".join(failures))
 
 
 if __name__ == "__main__":
