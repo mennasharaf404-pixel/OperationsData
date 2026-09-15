@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-EL MOLTQA — Operations Data Dashboard
+EL MOLTQA — Operations & Sales Dashboard
 Reads the existing Google Sheet without changing the source.
 The workbook contains monthly tabs with three separate tables:
 الحجوزات / التعاقدات / الالغاءات.
@@ -73,8 +73,50 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
     html, body, [class*="css"] { font-family: "Cairo", sans-serif; }
     .stApp { background: #f4f6f8; }
-    [data-testid="stSidebar"] { background: linear-gradient(180deg,#17212b 0%,#0f1720 100%); }
-    [data-testid="stSidebar"] * { color: #f8fafc !important; }
+    [data-testid="stSidebar"] {
+      background: linear-gradient(180deg,#14202a 0%,#0b1219 100%);
+      border-right: 1px solid rgba(255,255,255,.08);
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div {
+      color: #f8fafc !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] > div { gap: 8px; }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label {
+      background: rgba(255,255,255,.055);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin: 2px 0;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+      background: rgba(255,255,255,.10);
+      border-color: rgba(255,255,255,.18);
+    }
+    [data-testid="stSidebar"] .stButton > button {
+      background: #243646 !important;
+      color: #ffffff !important;
+      border: 1px solid #466071 !important;
+      border-radius: 10px !important;
+      font-weight: 700 !important;
+      min-height: 42px;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover {
+      background: #2f4a5e !important;
+      border-color: #6c8ea2 !important;
+      color: #ffffff !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stTextInput"] > div > div {
+      background: #182633 !important;
+      color: #ffffff !important;
+      border-color: #405667 !important;
+    }
+    [data-testid="stSidebar"] input { color: #ffffff !important; }
+    [data-testid="stSidebar"] small { color: #b9c7d1 !important; }
     .hero {
       background: linear-gradient(135deg,#13202b 0%,#1e3444 55%,#274b5b 100%);
       border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:28px 30px;
@@ -251,7 +293,7 @@ def html_export_url(sheet_id, tab):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_tab(tab_name, local_file_name=""):
+def load_tab(tab_name):
     """Load the original worksheet structure as faithfully as possible.
 
     IMPORTANT: Never silently prefer CSV over XLSX if an Excel export is
@@ -324,57 +366,19 @@ def load_tab(tab_name, local_file_name=""):
     except Exception as e:
         errors.append(f"Google CSV: {type(e).__name__}: {e}")
 
-    # 4) Local Excel fallback.
-    if local_file_name:
-        try:
-            path = Path(local_file_name)
-            if path.exists():
-                book = pd.ExcelFile(path, engine="openpyxl")
-                actual = next((x for x in book.sheet_names if x == tab_name), None)
-                if actual is None:
-                    actual = next((x for x in book.sheet_names if x.strip().lower() == tab_name.strip().lower()), None)
-                if actual is None:
-                    raise ValueError(f"Tab not found in local workbook: {tab_name}")
-                df = pd.read_excel(book, sheet_name=actual, header=None, dtype=str, keep_default_na=False).fillna("")
-                return df, "local-xlsx", None
-        except Exception as e:
-            errors.append(f"Local XLSX: {type(e).__name__}: {e}")
-
     return None, None, " | ".join(errors)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_all_months(local_file_bytes=None, cache_version="2026-09-14-v6"):
-    """Read every month first, then parse its three tables.
-
-    The cache_version intentionally busts old empty-cache results from earlier builds.
-    """
-    local_path = ""
-    tmp_path = ""
-    if local_file_bytes:
-        try:
-            import tempfile
-            with tempfile.NamedTemporaryFile(prefix="elmoltqa_", suffix=".xlsx", delete=False) as f:
-                f.write(local_file_bytes)
-                tmp_path = f.name
-            local_path = tmp_path
-        except Exception:
-            local_path = ""
-
-    # Auto-detect a workbook already placed beside the app.
-    if not local_path:
-        for candidate in ["Copy of OPERTION 2026.xlsx", "dataexcel.xlsx", "OPERTION 2026.xlsx"]:
-            if Path(candidate).exists():
-                local_path = candidate
-                break
-
+def load_all_months(cache_version="2026-09-15-v1"):
+    """Read every Google Sheet month, then parse the three tables."""
     all_rows = []
     diagnostics = {}
     raw_sizes = {}
     failures = []
 
     for month, tab in MONTH_TAB_MAP.items():
-        raw, source, err = load_tab(tab, local_path)
+        raw, source, err = load_tab(tab)
         if raw is None:
             failures.append(f"{month} ({tab})")
             diagnostics[month] = {"tab": tab, "source": None, "error": err}
@@ -400,18 +404,7 @@ def load_all_months(local_file_bytes=None, cache_version="2026-09-14-v6"):
             ])
             all_rows.append(x)
 
-    if all_rows:
-        union = pd.concat(all_rows, ignore_index=True, sort=False).fillna("")
-    else:
-        union = pd.DataFrame()
-
-    # Remove the temporary uploaded copy after parsing.
-    if tmp_path:
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-
+    union = pd.concat(all_rows, ignore_index=True, sort=False).fillna("") if all_rows else pd.DataFrame()
     return union, diagnostics, raw_sizes, failures
 
 # =========================================================
@@ -610,10 +603,17 @@ def add_management_ui(all_data, changes):
         month_options=MONTHS
         cat_options=CATEGORIES
         with st.form("add_record_form", clear_on_submit=True):
-            a1,a2=st.columns(2)
-            with a1: month=st.selectbox("الشهر", month_options, key="add_month")
-            with a2: cat=st.selectbox("القسم", cat_options, key="add_cat")
-            source=all_data[all_data["النوع"].eq(cat)] if not all_data.empty else pd.DataFrame()
+            a1, a2 = st.columns(2)
+            with a1:
+                month = st.selectbox("الشهر", month_options, key="add_month")
+            with a2:
+                cat = st.selectbox(
+                    "نوع السجل",
+                    cat_options,
+                    format_func=lambda x: f"{ICON.get(x, '')} {x}",
+                    key="add_category",
+                )
+            source = all_data[all_data["النوع"].eq(cat)] if not all_data.empty else pd.DataFrame()
             cols=[c for c in compact_columns(source) if c not in {"الشهر","النوع","__key__"}]
             common=[c for c in ["م","كود العميل","اسم العميل","تيم ليدر","رقم العمارة","رقم الوحده","المساحه","اسم المرحلة","المشروع","مصدر العميل","تاريخ الحجز","تاريخ التعاقد","تاريخ الالغاء","اجمالي الوحده","المقدم","مبلع الحجز","طريقة الدفع","اسم البائع","ملحوظات"] if c in cols]
             fields={}
@@ -701,44 +701,22 @@ def main():
             st.rerun()
 
         st.divider()
-        st.markdown("### العرض")
         view_mode = st.radio(
-            "",
+            "Select option",
             ["نظرة عامة", "الحجوزات", "التعاقدات", "الالغاءات", "كل البيانات", "إدارة البيانات"],
-            label_visibility="collapsed",
+            label_visibility="visible",
         )
 
-        selected_month = st.selectbox("الشهر", ["كل الشهور"] + ordered_months(MONTHS))
-        search = st.text_input("بحث", placeholder="العميل، الوحدة، العمارة أو أي قيمة ...")
+        selected_month = st.selectbox("اختيار الشهر", ["كل الشهور"] + ordered_months(MONTHS))
+        search = st.text_input("بحث سريع", placeholder="اسم العميل، الوحدة، العمارة...")
 
-        st.divider()
-        st.caption("المصدر الأساسي: Google Sheets")
-        local_upload = st.file_uploader(
-            "ملف Excel احتياطي (اختياري)",
-            type=["xlsx", "xls"],
-            help="يُستخدم فقط إذا تعذر الوصول إلى Google Sheets. لا يغيّر المصدر الأصلي.",
-        )
-    with st.spinner("جاري قراءة جميع الشهور والجداول..."):
-        upload_bytes = local_upload.getvalue() if local_upload is not None else None
-        all_data, diagnostics, raw_sizes, failures = load_all_months(upload_bytes)
+    with st.spinner("جاري تحميل البيانات..."):
+        all_data, diagnostics, raw_sizes, failures = load_all_months()
 
     all_data, changes = apply_changes(all_data)
 
     if all_data.empty:
-        st.error("تم الوصول إلى التطبيق، لكن لم يتم استخراج أي سجل من الجداول.")
-        if failures:
-            st.caption("تعذر تحميل: " + ", ".join(failures))
-        st.markdown("### فحص مصدر البيانات")
-        for month, info in diagnostics.items():
-            if info.get("source"):
-                st.write({
-                    "الشهر": month,
-                    "Tab": info.get("tab"),
-                    "المصدر": info.get("source"),
-                    "الأقسام": info.get("sections", []),
-                })
-            else:
-                st.write({"الشهر": month, "Tab": info.get("tab"), "الخطأ": info.get("error", "")})
+        st.error("لم نتمكن من تحميل البيانات الآن.")
         return
 
     # Base view
@@ -764,8 +742,9 @@ def main():
 
     # Header
     st.markdown(
-        f"<div class='hero'><div class='hero-title'>Operations Data</div>"
-        f" <span class='small-tag'>{len(current):,} سجل </span></div></div>",
+        f"<div class='hero'><div class='hero-title'>Operations</div>"
+        f"<div class='hero-sub'>• {('كل الشهور' if selected_month == 'كل الشهور' else selected_month)}"
+        f" <span class='small-tag'>{len(current):,} سجل ظاهر</span></div></div>",
         unsafe_allow_html=True,
     )
 
@@ -795,7 +774,7 @@ def main():
                 all_data.groupby(["الشهر","النوع"])
                 .size()
                 .unstack(fill_value=0)
-                .reindex(month_order)
+                .reindex(list(reversed(month_order)))
             )
             for c in CATEGORIES:
                 if c not in summary.columns:
@@ -813,7 +792,7 @@ def main():
         with c2:
             st.markdown("#### إجمالي السجلات حسب الشهر")
             month_order = ordered_months(all_data["الشهر"].unique())
-            by_month = all_data.groupby("الشهر").size().reindex(month_order).fillna(0)
+            by_month = all_data.groupby("الشهر").size().reindex(list(reversed(month_order))).fillna(0)
             st.bar_chart(by_month, use_container_width=True)
 
         st.markdown("### أهم الأرقام المتاحة")
