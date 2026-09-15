@@ -430,7 +430,25 @@ def find_col(df, names):
     return None
 
 
+def category_value_col(df, category):
+    """Pick the financially meaningful column for each section from the real source layout."""
+    if category == "الحجوزات":
+        return find_col(df, [
+            "مبلع الحجز", "مبلغ الحجز", "قيمه الحجز", "قيمة الحجز"
+        ])
+    if category == "التعاقدات":
+        return find_col(df, [
+            "اجمالي الوحده", "اجمالي الوحدة", "اجمالي"
+        ])
+    if category == "الالغاءات":
+        return find_col(df, [
+            "مبلع الحجز", "مبلغ الحجز", "قيمه الحجز", "قيمة الحجز"
+        ])
+    return None
+
+
 def money_col(df):
+    # Backward-compatible generic helper for non-category-specific views.
     return find_col(df, ["اجمالي الوحده", "اجمالي الوحدة", "مبلغ المقدم", "مبلع الحجز", "اجمالي"])
 
 
@@ -754,8 +772,22 @@ def main():
     if view_mode == "نظرة عامة":
         counts = all_data["النوع"].value_counts()
         total_records = len(all_data)
-        value_column = money_col(all_data)
-        total_value = numeric_value(all_data[value_column]).sum() if value_column else np.nan
+        booking_value_col = category_value_col(all_data[all_data["النوع"].eq("الحجوزات")], "الحجوزات")
+        contract_value_col = category_value_col(all_data[all_data["النوع"].eq("التعاقدات")], "التعاقدات")
+        cancel_value_col = category_value_col(all_data[all_data["النوع"].eq("الالغاءات")], "الالغاءات")
+
+        booking_value = (
+            numeric_value(all_data.loc[all_data["النوع"].eq("الحجوزات"), booking_value_col]).sum()
+            if booking_value_col else np.nan
+        )
+        contract_value = (
+            numeric_value(all_data.loc[all_data["النوع"].eq("التعاقدات"), contract_value_col]).sum()
+            if contract_value_col else np.nan
+        )
+        cancel_value = (
+            numeric_value(all_data.loc[all_data["النوع"].eq("الالغاءات"), cancel_value_col]).sum()
+            if cancel_value_col else np.nan
+        )
         k1,k2,k3,k4 = st.columns(4)
         cards=[
             (k1,"إجمالي السجلات",f"{total_records:,}","من كل الشهور والأقسام"),
@@ -795,16 +827,21 @@ def main():
             by_month = all_data.groupby("الشهر").size().reindex(list(reversed(month_order))).fillna(0)
             st.bar_chart(by_month, use_container_width=True)
 
-        st.markdown("### أهم الأرقام المتاحة")
-        c1,c2,c3 = st.columns(3)
+        st.markdown("### القيم المالية حسب القسم")
+        c1,c2,c3,c4 = st.columns(4)
         with c1:
-            st.metric("إجمالي القيمة", f"{total_value:,.0f}" if pd.notna(total_value) else "—")
+            st.metric("إجمالي قيم الحجوزات", f"{booking_value:,.0f}" if pd.notna(booking_value) else "—")
+            st.caption(f"المصدر: {booking_value_col or 'غير متاح'}")
         with c2:
+            st.metric("إجمالي قيمة التعاقدات", f"{contract_value:,.0f}" if pd.notna(contract_value) else "—")
+            st.caption(f"المصدر: {contract_value_col or 'غير متاح'}")
+        with c3:
+            st.metric("إجمالي قيم الإلغاءات", f"{cancel_value:,.0f}" if pd.notna(cancel_value) else "—")
+            st.caption(f"المصدر: {cancel_value_col or 'غير متاح'}")
+        with c4:
             ac = area_col(all_data)
             area_total = numeric_value(all_data[ac]).sum() if ac else np.nan
             st.metric("إجمالي المساحة", f"{area_total:,.0f}" if pd.notna(area_total) else "—")
-        with c3:
-            st.metric("متوسط السجلات / شهر", f"{(total_records / max(1, len(ordered_months(all_data['الشهر'].unique())))):.1f}")
 
     else:
         # =================================================
@@ -829,9 +866,14 @@ def main():
 
         c1,c2,c3,c4 = st.columns(4)
         c1.metric("السجلات", f"{len(current):,}")
-        vc = money_col(current)
+        vc = category_value_col(current, view_mode) if view_mode in CATEGORIES else money_col(current)
         v = numeric_value(current[vc]).sum() if vc else np.nan
-        c2.metric("إجمالي القيمة", f"{v:,.0f}" if pd.notna(v) else "—")
+        value_label = {
+            "الحجوزات": "إجمالي قيم الحجوزات",
+            "التعاقدات": "إجمالي قيمة التعاقدات",
+            "الالغاءات": "إجمالي قيم الإلغاءات",
+        }.get(view_mode, "إجمالي القيمة")
+        c2.metric(value_label, f"{v:,.0f}" if pd.notna(v) else "—")
         ac = area_col(current)
         a = numeric_value(current[ac]).sum() if ac else np.nan
         c3.metric("إجمالي المساحة", f"{a:,.0f}" if pd.notna(a) else "—")
