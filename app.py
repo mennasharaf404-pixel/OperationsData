@@ -770,30 +770,28 @@ def main():
     # OVERVIEW
     # =====================================================
     if view_mode == "نظرة عامة":
-        counts = all_data["النوع"].value_counts()
-        total_records = len(all_data)
-        booking_value_col = category_value_col(all_data[all_data["النوع"].eq("الحجوزات")], "الحجوزات")
-        contract_value_col = category_value_col(all_data[all_data["النوع"].eq("التعاقدات")], "التعاقدات")
-        cancel_value_col = category_value_col(all_data[all_data["النوع"].eq("الالغاءات")], "الالغاءات")
+        # The main dashboard follows the selected month. When "كل الشهور" is
+        # selected, it naturally falls back to the full dataset.
+        overview_data = current.copy()
+        counts = overview_data["النوع"].value_counts()
+        total_records = len(overview_data)
+        booking_rows = overview_data[overview_data["النوع"].eq("الحجوزات")]
+        contract_rows = overview_data[overview_data["النوع"].eq("التعاقدات")]
+        cancel_rows = overview_data[overview_data["النوع"].eq("الالغاءات")]
 
-        booking_value = (
-            numeric_value(all_data.loc[all_data["النوع"].eq("الحجوزات"), booking_value_col]).sum()
-            if booking_value_col else np.nan
-        )
-        contract_value = (
-            numeric_value(all_data.loc[all_data["النوع"].eq("التعاقدات"), contract_value_col]).sum()
-            if contract_value_col else np.nan
-        )
-        cancel_value = (
-            numeric_value(all_data.loc[all_data["النوع"].eq("الالغاءات"), cancel_value_col]).sum()
-            if cancel_value_col else np.nan
-        )
+        booking_value_col = category_value_col(booking_rows, "الحجوزات")
+        contract_value_col = category_value_col(contract_rows, "التعاقدات")
+        cancel_value_col = category_value_col(cancel_rows, "الالغاءات")
+
+        booking_value = numeric_value(booking_rows[booking_value_col]).sum() if booking_value_col else np.nan
+        contract_value = numeric_value(contract_rows[contract_value_col]).sum() if contract_value_col else np.nan
+        cancel_value = numeric_value(cancel_rows[cancel_value_col]).sum() if cancel_value_col else np.nan
         k1,k2,k3,k4 = st.columns(4)
         cards=[
-            (k1,"إجمالي السجلات",f"{total_records:,}","من كل الشهور والأقسام"),
-            (k2,"الحجوزات",f"{int(counts.get('الحجوزات',0)):,}","كل السجلات المحجوزة"),
-            (k3,"التعاقدات",f"{int(counts.get('التعاقدات',0)):,}","كل السجلات المتعاقد عليها"),
-            (k4,"الإلغاءات",f"{int(counts.get('الالغاءات',0)):,}","كل السجلات الملغاة"),
+            (k1,"إجمالي السجلات",f"{total_records:,}","حسب الاختيار الحالي"),
+            (k2,"الحجوزات",f"{int(counts.get('الحجوزات',0)):,}","حسب الشهر المحدد"),
+            (k3,"التعاقدات",f"{int(counts.get('التعاقدات',0)):,}","حسب الشهر المحدد"),
+            (k4,"الإلغاءات",f"{int(counts.get('الالغاءات',0)):,}","حسب الشهر المحدد"),
         ]
         for col,label,val,note in cards:
             with col:
@@ -801,9 +799,9 @@ def main():
 
         st.markdown("### ملخص شهري")
         if selected_month == "كل الشهور":
-            month_order = ordered_months(all_data["الشهر"].unique())
+            month_order = ordered_months(overview_data["الشهر"].unique())
             summary = (
-                all_data.groupby(["الشهر","النوع"])
+                overview_data.groupby(["الشهر","النوع"])
                 .size()
                 .unstack(fill_value=0)
                 .reindex(list(reversed(month_order)))
@@ -823,8 +821,8 @@ def main():
             )
         with c2:
             st.markdown("#### إجمالي السجلات حسب الشهر")
-            month_order = ordered_months(all_data["الشهر"].unique())
-            by_month = all_data.groupby("الشهر").size().reindex(list(reversed(month_order))).fillna(0)
+            month_order = ordered_months(overview_data["الشهر"].unique())
+            by_month = overview_data.groupby("الشهر").size().reindex(list(reversed(month_order))).fillna(0)
             st.bar_chart(by_month, use_container_width=True)
 
         st.markdown("### القيم المالية حسب القسم")
@@ -840,7 +838,7 @@ def main():
             st.caption(f"المصدر: {cancel_value_col or 'غير متاح'}")
         with c4:
             ac = area_col(all_data)
-            area_total = numeric_value(all_data[ac]).sum() if ac else np.nan
+            area_total = numeric_value(overview_data[ac]).sum() if ac else np.nan
             st.metric("إجمالي المساحة", f"{area_total:,.0f}" if pd.notna(area_total) else "—")
 
     else:
